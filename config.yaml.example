@@ -1,0 +1,14 @@
+bilibili:
+  anchor_id: 1355412269
+  cookie_file: "cookies.json"
+  cookies:
+    buvid3: "D7C94C56-CED0-502C-BE1F-23658078141533737infoc"
+    b_nut: "1757652233"
+    # Add other cookies as needed from your curl example
+
+download:
+  output_dir: "./downloads"
+  temp_dir: "./temp"
+  filename_template: "{yy}-{MM}-{dd} {start:150405} {title}.mp4"
+  max_concurrent_tasks: 2
+  concurrent_segments: 5
