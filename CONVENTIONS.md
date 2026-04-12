@@ -42,3 +42,41 @@
   - 暂停状态的进度、速度信息不应在刷新/重启后丢失。
   - m3u8 URL 与内容在获取后应持久化；当发生变化时以最后一次保存为准。
 
+## 7. 架构与代码职责划分 (Architecture Conventions)
+
+- **API 接口层极简原则**: `pkg/api` 下的路由 Handler 仅负责处理 HTTP 请求打解包与极少的组装逻辑，禁止包含针对文件系统的详细操纵或文件改名等业务行为。
+- **公共逻辑抽离原则**: 若有一段文件操作、正则匹配或其他纯计算逻辑块被多处（如 Worker 层和 API 层）独立使用，必须抽取到 `pkg/utils` 共享包内以杜绝代码拷贝导致的潜在 Bug。
+- **文件隔离要求**: 严禁将底层平台依赖（如调用 `windows.GetDiskFreeSpaceEx`）与其他业务代码相混，应独立封装在 `pkg/utils/disk_windows.go` 这类专用文件中。
+
+## 8. 前后端通信与状态同步最佳实践 (Frontend Polling and State Sync Strategies)
+
+- **禁止无脑定时器**: 前端系统禁止针对 API 接口滥用盲目的 `setInterval` 轮询探测。
+- **按需降频逻辑 (Dynamic Back-off)**: 对于磁盘、容量等只有在运行特定任务时才会变化的数据，必须结合当前业务的活跃状态来智能轮询（例如：有正在下载的录播任务时15s一刷，闲置时降为60s，或甚至暂停查询直到下次重新 focus 页面）。
+- **复用长连接 (WebSocket Reuse)**: 对于检查服务器健康与后台存活状态，应**优先依赖**已建立的 `WebSocket` 长连接其本身的事件通信（即 `onclose`、`onerror`）来获知掉线情况，而非采用激进的短轮询 HTTP 心跳包去消耗过多并发连接。
+
+## 9. UI 组件规范 (UI Components Conventions)
+
+- **开关按钮 (Toggle Switch)**:
+  - 为了保持整体视觉统一，开关控制（如“开启代理”）不应使用原生的 `<input type="checkbox">`。
+  - 应当统一使用基于 `<button role="switch">` 的 Tailwind 样式组件。包含一个外层轮廓盒（与其他操作按钮高度、边框对齐），并在内部实现圆角矩形与滑块动画（`translate-x`），且需支持 `t('key')` 国际化文案：
+    ```tsx
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => setChecked(!checked)}
+      className="flex items-center gap-2 cursor-pointer px-3 py-2 bg-white border border-slate-300 text-sm font-medium text-slate-700 rounded-lg hover:bg-slate-50 transition focus:outline-none focus:ring-2 focus:ring-[var(--color-bili-blue)] focus:ring-offset-1"
+    >
+      <div className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${checked ? 'bg-[var(--color-bili-blue)]' : 'bg-slate-300'}`}>
+        <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform ${checked ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+      </div>
+      <span>{t('your.i18n.key')}</span>
+    </button>
+    ```
+
+- **按钮与图标规范 (Button Icons)**:
+  - 为了提供友好的视觉提示，左侧栏或其他主要操作按钮必须搭配语义对应的 Lucide 图标。例如，普通管理类用 `<Wrench>`，清理等带破坏/释放空间性质的操作应更换为 `<Eraser>` 或 `<Trash2>`，而不是复用一个图标。
+
+- **多语言国际化 (i18n Strictness)**:
+  - **所有的** UI 提示内容（包括但不限于弹窗 Toast、按钮文案、兜底的错误提示文字如“Copy Failed”，以及模态框的标题和空状态等）必须通过 `t('...')` 获取，并在对应的 `zh.json` 与 `en.json` 中定义好。
+  - 严禁在页面结构或状态更新逻辑中直接硬编码中文/英文字符串。即使是拼装的字符串（如“共清理了 xx 条”）也推荐使用 i18n 的插值 `{t('key', { count })}` 来实现。

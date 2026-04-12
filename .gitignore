@@ -53,3 +53,7 @@ Thumbs.db
 .idea/
 .vscode/
 .trae/
+ 
+release/
+*.zip
+scratch/

@@ -1,6 +1,6 @@
 //go:build windows
 
-package api
+package utils
 
 import (
 	"path/filepath"
@@ -8,7 +8,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func getDiskTotalFree(path string) (uint64, uint64, error) {
+func GetDiskTotalFree(path string) (uint64, uint64, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path

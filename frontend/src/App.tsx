@@ -1,4 +1,5 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import axios from 'axios'
 import {
@@ -15,6 +16,9 @@ import {
   X,
   CheckCircle,
   XCircle,
+  Copy,
+  MoreHorizontal,
+  Eraser,
   Loader2,
 } from 'lucide-react'
 
@@ -109,6 +113,17 @@ type PageKey = 'downloads' | 'settings'
 
 type FsEntry = { name: string; path: string }
 type FsListResponse = { current: string; parent: string; entries: FsEntry[] }
+
+function getErrorMessage(e: any) {
+  const apiErr = e?.response?.data?.error
+  if (apiErr) return apiErr
+  const status = e?.response?.status
+  if (status) {
+    const statusText = e?.response?.statusText || ''
+    return `HTTP ${status}${statusText ? ` ${statusText}` : ''}`
+  }
+  return e?.message || 'Unknown error'
+}
 
 function formatBytes(bytes: number) {
   if (!bytes) return '0 B'
@@ -212,156 +227,16 @@ type ToastTone = 'loading' | 'success' | 'error' | 'info'
 type Toast = { id: number; tone: ToastTone; title: string; message?: string }
 
 function App() {
-  const [lang, setLang] = useState<'zh' | 'en'>(() => {
-    const v = localStorage.getItem('lang')
-    return v === 'en' ? 'en' : 'zh'
-  })
+  const { t, i18n } = useTranslation()
+  const lang = i18n.language
   const [page, setPage] = useState<PageKey>('downloads')
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [exportUseProxy, setExportUseProxy] = useState(false)
 
-  useEffect(() => {
-    localStorage.setItem('lang', lang)
-  }, [lang])
 
-  const texts = useMemo(() => {
-    const zh = {
-      downloads: '下载',
-      settings: '配置',
-      backendOnline: '后端在线',
-      backendOffline: '后端离线',
-      paused: '已暂停',
-      loggedIn: '已登录',
-      notLoggedIn: '未登录',
-      pauseAll: '暂停全部',
-      resumeAll: '继续全部',
-      fixStale: '修复异常状态',
-      refresh: '刷新',
-      scan: '扫描',
-      refreshing: '正在刷新…',
-      refreshOk: '刷新完成',
-      refreshFailed: '刷新失败',
-      refreshTip: '从本地数据库重新拉一遍任务列表（不会去 B 站请求）。',
-      scanStarting: '开始扫描…',
-      scanOk: '扫描已启动',
-      scanFailed: '扫描失败',
-      scanTip: '去 B 站拉取最近的录播列表，增量写入/更新本地数据库。',
-      renamePrompt: '你修改了文件名模板。要不要顺便把历史已下载的视频文件也改名？（只影响“已完成且文件还在”的视频）',
-      syncAllPending: '一键下载未完成',
-      syncing: '下载中…',
-      records: '记录数',
-      active: '进行中',
-      mode: '模式',
-      running: '运行中',
-      downloadsTitle: '下载',
-      downloadsDesc: '管理录播下载、暂停与恢复',
-      queue: '下载队列',
-      empty: '暂无记录，点击“扫描”拉取最新录播。',
-      start: '开始',
-      duration: '时长',
-      size: '大小',
-      speed: '速度',
-      startBtn: '开始下载',
-      pauseBtn: '暂停下载',
-      resumeBtn: '继续下载',
-      details: '详情',
-      detailsTitle: '录播详情',
-      status: '状态',
-      startTime: '开始时间',
-      endTime: '结束时间',
-      resolution: '分辨率',
-      bitrate: '码率',
-      fileSize: '文件大小',
-      localPath: '本地路径',
-      close: '关闭',
-      configTitle: '配置',
-      configDesc: 'Anchor ID、下载目录、并发与命名规则',
-      save: '保存配置',
-      saving: '保存中…',
-      systemConfig: '系统配置',
-      anchorId: 'Anchor ID',
-      outputDir: '下载目录',
-      browse: '选择',
-      outputTip: '修改目录会自动搬迁已下载的视频与封面文件。',
-      filenameTpl: '文件名模板',
-      maxTasks: '任务并发',
-      segConc: '分片并发',
-      chooseDir: '选择下载目录',
-      drives: '磁盘',
-      up: '上一级',
-      noSubfolders: '没有子文件夹',
-      selected: '已选择',
-      useFolder: '使用该目录',
-    }
-    const en = {
-      downloads: 'Downloads',
-      settings: 'Settings',
-      backendOnline: 'Backend Online',
-      backendOffline: 'Backend Offline',
-      paused: 'Paused',
-      loggedIn: 'Logged In',
-      notLoggedIn: 'Not Logged In',
-      pauseAll: 'Pause All',
-      resumeAll: 'Resume All',
-      fixStale: 'Fix Stale',
-      refresh: 'Refresh',
-      scan: 'Scan',
-      refreshing: 'Refreshing…',
-      refreshOk: 'Refresh completed',
-      refreshFailed: 'Refresh failed',
-      refreshTip: 'Reload task list from local DB (no Bilibili request).',
-      scanStarting: 'Scanning…',
-      scanOk: 'Scan started',
-      scanFailed: 'Scan failed',
-      scanTip: 'Fetch recent replays from Bilibili and update local DB incrementally.',
-      renamePrompt: 'Filename template changed. Rename already-downloaded videos too? (only completed + existing files)',
-      syncAllPending: 'Download Pending',
-      syncing: 'Downloading…',
-      records: 'Records',
-      active: 'Active',
-      mode: 'Mode',
-      running: 'Running',
-      downloadsTitle: 'Downloads',
-      downloadsDesc: 'Manage downloads, pause and resume',
-      queue: 'Download Queue',
-      empty: 'No records. Click Scan to fetch latest.',
-      start: 'Start',
-      duration: 'Duration',
-      size: 'Size',
-      speed: 'Speed',
-      startBtn: 'Start',
-      pauseBtn: 'Pause',
-      resumeBtn: 'Resume',
-      details: 'Details',
-      detailsTitle: 'Replay Details',
-      status: 'Status',
-      startTime: 'Start Time',
-      endTime: 'End Time',
-      resolution: 'Resolution',
-      bitrate: 'Bitrate',
-      fileSize: 'File Size',
-      localPath: 'Local File Path',
-      close: 'Close',
-      configTitle: 'Settings',
-      configDesc: 'Anchor ID, output directory, concurrency and naming',
-      save: 'Save',
-      saving: 'Saving…',
-      systemConfig: 'System Configuration',
-      anchorId: 'Anchor ID',
-      outputDir: 'Output Directory',
-      browse: 'Browse',
-      outputTip: 'Changing directory will migrate existing files.',
-      filenameTpl: 'Filename Template',
-      maxTasks: 'Max Tasks',
-      segConc: 'Segment Concurrency',
-      chooseDir: 'Choose Output Directory',
-      drives: 'Drives',
-      up: 'Up',
-      noSubfolders: 'No subfolders',
-      selected: 'Selected',
-      useFolder: 'Use This Folder',
-    }
-    return lang === 'en' ? en : zh
-  }, [lang])
+
+
 
   const [replays, setReplays] = useState<Replay[]>([])
   const [config, setConfig] = useState<Config | null>(null)
@@ -380,6 +255,21 @@ function App() {
   const [toasts, setToasts] = useState<Toast[]>([])
   const toastSeq = useRef(1)
   const toastTimers = useRef<Record<number, number>>({})
+  const advancedMenuRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (advancedMenuRef.current && !advancedMenuRef.current.contains(event.target as Node)) {
+        setShowAdvanced(false)
+      }
+    }
+    if (showAdvanced) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [showAdvanced])
 
   const [dirModalOpen, setDirModalOpen] = useState(false)
   const [dirCurrent, setDirCurrent] = useState('')
@@ -458,7 +348,7 @@ function App() {
     fetchMe()
     fetchRuntime()
     pingHealth()
-    const healthTimer = setInterval(pingHealth, 5000)
+    const healthTimer = setInterval(pingHealth, 30000)
 
     const ws = new WebSocket(`ws://${window.location.host}/ws`)
     ws.onopen = () => setBackendOnline(true)
@@ -513,11 +403,9 @@ function App() {
         const status = (e as any)?.response?.status
         const msg =
           status === 404
-            ? (lang === 'en'
-                ? 'Endpoint not found. Backend may be outdated or not restarted.'
-                : '接口不存在（404）。后端可能还是旧版本，或没有重启到最新二进制。')
+            ? (t('messages.endpointNotFound'))
             : getErrorMessage(e)
-        showToast({ tone: 'error', title: lang === 'en' ? 'Disk stats failed' : '磁盘统计失败', message: msg })
+        showToast({ tone: 'error', title: t('messages.diskStatsFailed'), message: msg })
       }
     } finally {
       setDiskStatsLoading(false)
@@ -526,9 +414,10 @@ function App() {
 
   useEffect(() => {
     fetchDiskStats()
-    const t = window.setInterval(fetchDiskStats, 15000)
+    const intervalMs = activeDownloading > 0 ? 15000 : 60000
+    const t = window.setInterval(fetchDiskStats, intervalMs)
     return () => window.clearInterval(t)
-  }, [fetchDiskStats])
+  }, [fetchDiskStats, activeDownloading])
 
   useEffect(() => {
     return () => {
@@ -548,7 +437,7 @@ function App() {
 
   const fetchReplays = async (opts?: { notify?: boolean }) => {
     const notify = !!opts?.notify
-    const toastId = notify ? showToast({ tone: 'loading', title: texts.refreshing }) : null
+    const toastId = notify ? showToast({ tone: 'loading', title: t('messages.refreshing') }) : null
     if (notify) setIsRefreshing(true)
     try {
       const res = await axios.get('/api/replays')
@@ -559,19 +448,17 @@ function App() {
         const counts: Record<string, number> = {}
         for (const r of list) counts[r.status] = (counts[r.status] || 0) + 1
         const msg =
-          lang === 'en'
-            ? `Total ${list.length}. Completed ${counts.completed || 0}, Active ${(counts.downloading || 0) + (counts.merging || 0)}, Paused ${counts.paused || 0}, Deleted ${counts.deleted || 0}, Failed ${counts.failed || 0}, Pending ${counts.pending || 0}.`
-            : `共 ${list.length} 条：已完成 ${counts.completed || 0}，进行中 ${(counts.downloading || 0) + (counts.merging || 0)}，暂停 ${counts.paused || 0}，Deleted ${counts.deleted || 0}，失败 ${counts.failed || 0}，待处理 ${counts.pending || 0}。`
+          t('messages.refreshSummary', { 'total': list.length, 'completed': counts.completed || 0, 'active': (counts.downloading || 0) + (counts.merging || 0), 'paused': counts.paused || 0, 'deleted': counts.deleted || 0, 'failed': counts.failed || 0, 'pending': counts.pending || 0 })
         replaceToast(toastId, {
           tone: 'success',
-          title: texts.refreshOk,
+          title: t('messages.refreshOk'),
           message: msg,
         })
       }
     } catch (e) {
       setBackendOnline(false)
       if (toastId) {
-        replaceToast(toastId, { tone: 'error', title: texts.refreshFailed, message: getErrorMessage(e) })
+        replaceToast(toastId, { tone: 'error', title: t('messages.refreshFailed'), message: getErrorMessage(e) })
       }
     } finally {
       if (notify) setIsRefreshing(false)
@@ -599,17 +486,6 @@ function App() {
     }
   }
 
-  function getErrorMessage(e: any) {
-    const apiErr = e?.response?.data?.error
-    if (apiErr) return apiErr
-    const status = e?.response?.status
-    if (status) {
-      const statusText = e?.response?.statusText || ''
-      return `HTTP ${status}${statusText ? ` ${statusText}` : ''}`
-    }
-    return e?.message || 'Unknown error'
-  }
-
   const fetchRuntime = async () => {
     try {
       const res = await axios.get('/api/runtime')
@@ -623,7 +499,7 @@ function App() {
 
   const handleScan = async () => {
     setIsScanning(true)
-    const toastId = showToast({ tone: 'loading', title: texts.scanStarting })
+    const toastId = showToast({ tone: 'loading', title: t('messages.scanStarting') })
     try {
       const res = await axios.post('/api/scan')
       setBackendOnline(true)
@@ -637,20 +513,24 @@ function App() {
         already_up_to_date: raw.already_up_to_date ?? raw.AlreadyUpToDate ?? 0,
       }
       const msg =
-        lang === 'en'
-          ? `Fetched ${s.fetched}. New ${s.new_records}, Updated ${s.updated_records}, Covers ${s.covers_updated}, Marked Deleted ${s.marked_deleted}, Unchanged ${s.already_up_to_date}.`
-          : `我去 B 站看了一圈：获取到列表 ${s.fetched} 条。新增 ${s.new_records}，更新 ${s.updated_records}，补封面 ${s.covers_updated}，标记 Deleted ${s.marked_deleted}，没变化 ${s.already_up_to_date}。${
-              s.fetched === 0
-                ? '（如果你最近一段时间没有录播，0 是正常；如果你确定有录播但仍为 0，可能是扫描范围太小或账号状态异常。）'
-                : ''
-            }`
-      replaceToast(toastId, { tone: 'success', title: texts.scanOk, message: msg })
+        t('messages.scanSummary', { 'fetched': s.fetched, 'new_records': s.new_records, 'updated_records': s.updated_records, 'covers_updated': s.covers_updated, 'marked_deleted': s.marked_deleted, 'already_up_to_date': s.already_up_to_date }) + (s.fetched === 0 ? t('messages.scanSummaryZero') : '')
+      replaceToast(toastId, { tone: 'success', title: t('messages.scanOk'), message: msg })
       window.setTimeout(() => fetchReplays({ notify: false }), 1500)
     } catch (e) {
       setBackendOnline(false)
-      replaceToast(toastId, { tone: 'error', title: texts.scanFailed, message: getErrorMessage(e) })
+      replaceToast(toastId, { tone: 'error', title: t('messages.scanFailed'), message: getErrorMessage(e) })
     } finally {
       setIsScanning(false)
+    }
+  }
+
+  const handleCopyExport = async () => {
+    try {
+      const res = await axios.get(`/api/export-tsv?proxy=${exportUseProxy}`)
+      await navigator.clipboard.writeText(res.data)
+      showToast({ tone: 'success', title: t('messages.copyExportOk') })
+    } catch (e) {
+      showToast({ tone: 'error', title: t('messages.copyExportFailed'), message: getErrorMessage(e) })
     }
   }
 
@@ -658,11 +538,11 @@ function App() {
     setIsSyncingAll(true)
     try {
       await toastAction({
-        loadingTitle: lang === 'en' ? 'Starting…' : '正在启动…',
-        loadingMessage: lang === 'en' ? 'Dispatching download tasks.' : '正在把未完成的任务推进下载队列。',
-        successTitle: lang === 'en' ? 'Started' : '已启动',
-        successMessage: lang === 'en' ? 'Tasks are running in background.' : '后台开始跑任务了，进度会自动刷新。',
-        errorTitle: lang === 'en' ? 'Start failed' : '启动失败',
+        loadingTitle: t('messages.starting'),
+        loadingMessage: t('messages.dispatchingTasks'),
+        successTitle: t('messages.started'),
+        successMessage: t('messages.tasksRunning'),
+        errorTitle: t('messages.startFailed'),
         action: () => axios.post('/api/sync-all'),
       })
     } finally {
@@ -673,8 +553,8 @@ function App() {
   const handleCleanupStale = async () => {
     const toastId = showToast({
       tone: 'loading',
-      title: lang === 'en' ? 'Fixing…' : '正在修复…',
-      message: lang === 'en' ? 'Cleaning stale states.' : '正在清理异常的“卡住状态”。',
+      title: t('messages.fixing'),
+      message: t('messages.cleaningStale'),
     })
     try {
       const res = await axios.post('/api/cleanup-stale')
@@ -682,22 +562,44 @@ function App() {
       const count = res.data?.count ?? 0
       replaceToast(toastId, {
         tone: 'success',
-        title: lang === 'en' ? 'Fixed' : '已修复',
-        message: lang === 'en' ? `Fixed ${count}.` : `已修复 ${count} 条。`,
+        title: t('messages.fixed'),
+        message: t('messages.fixedCount', { 'count': count }),
       })
       await fetchReplays({ notify: false })
     } catch (e) {
       setBackendOnline(false)
-      replaceToast(toastId, { tone: 'error', title: lang === 'en' ? 'Fix failed' : '修复失败', message: getErrorMessage(e) })
+      replaceToast(toastId, { tone: 'error', title: t('messages.fixFailed'), message: getErrorMessage(e) })
+    }
+  }
+
+  const handleCleanupStreams = async () => {
+    const toastId = showToast({
+      tone: 'loading',
+      title: t('common.cleaning'),
+      message: t('messages.cleaningStreams'),
+    })
+    try {
+      const res = await axios.post('/api/cleanup-streams')
+      setBackendOnline(true)
+      const count = res.data?.count ?? 0
+      replaceToast(toastId, {
+        tone: 'success',
+        title: t('messages.cleanSuccess'),
+        message: t('messages.cleanStreamsCount', { count }),
+      })
+      await fetchReplays({ notify: false })
+    } catch (e) {
+      setBackendOnline(false)
+      replaceToast(toastId, { tone: 'error', title: t('messages.cleanFailed'), message: getErrorMessage(e) })
     }
   }
 
   const handlePauseAll = async () => {
     await toastAction({
-      loadingTitle: lang === 'en' ? 'Pausing…' : '正在暂停…',
-      loadingMessage: lang === 'en' ? 'Stopping active tasks.' : '正在把进行中的任务全部暂停。',
-      successTitle: lang === 'en' ? 'Paused' : '已暂停',
-      errorTitle: lang === 'en' ? 'Pause failed' : '暂停失败',
+      loadingTitle: t('messages.pausing'),
+      loadingMessage: t('messages.stoppingTasks'),
+      successTitle: t('messages.paused'),
+      errorTitle: t('messages.pauseFailed'),
       action: async () => {
         const res = await axios.post('/api/pause-all')
         setBackendOnline(true)
@@ -710,10 +612,10 @@ function App() {
 
   const handleResumeAll = async () => {
     await toastAction({
-      loadingTitle: lang === 'en' ? 'Resuming…' : '正在继续…',
-      loadingMessage: lang === 'en' ? 'Allowing tasks to run.' : '解除全局暂停，允许任务继续跑。',
-      successTitle: lang === 'en' ? 'Resumed' : '已继续',
-      errorTitle: lang === 'en' ? 'Resume failed' : '继续失败',
+      loadingTitle: t('messages.resuming'),
+      loadingMessage: t('messages.allowingTasks'),
+      successTitle: t('messages.resumed'),
+      errorTitle: t('messages.resumeFailed'),
       action: async () => {
         const res = await axios.post('/api/resume-all')
         setBackendOnline(true)
@@ -726,20 +628,20 @@ function App() {
 
   const handleDownload = async (liveKey: string) => {
     await toastAction({
-      loadingTitle: lang === 'en' ? 'Starting…' : '正在启动…',
-      loadingMessage: lang === 'en' ? 'Creating task.' : '正在创建下载任务。',
-      successTitle: lang === 'en' ? 'Started' : '已启动',
-      successMessage: lang === 'en' ? 'Watch progress in the list.' : '回到列表看进度条就行。',
-      errorTitle: lang === 'en' ? 'Start failed' : '启动失败',
+      loadingTitle: t('messages.starting'),
+      loadingMessage: t('messages.creatingTask'),
+      successTitle: t('messages.started'),
+      successMessage: t('messages.watchProgress'),
+      errorTitle: t('messages.startFailed'),
       action: () => axios.post(`/api/replays/${liveKey}/download`),
     })
   }
 
   const handlePauseReplay = async (liveKey: string) => {
     await toastAction({
-      loadingTitle: lang === 'en' ? 'Pausing…' : '正在暂停…',
-      successTitle: lang === 'en' ? 'Paused' : '已暂停',
-      errorTitle: lang === 'en' ? 'Pause failed' : '暂停失败',
+      loadingTitle: t('messages.pausing'),
+      successTitle: t('messages.paused'),
+      errorTitle: t('messages.pauseFailed'),
       action: async () => {
         const res = await axios.post(`/api/replays/${liveKey}/pause`)
         setBackendOnline(true)
@@ -751,9 +653,9 @@ function App() {
 
   const handleResumeReplay = async (liveKey: string) => {
     await toastAction({
-      loadingTitle: lang === 'en' ? 'Resuming…' : '正在继续…',
-      successTitle: lang === 'en' ? 'Resumed' : '已继续',
-      errorTitle: lang === 'en' ? 'Resume failed' : '继续失败',
+      loadingTitle: t('messages.resuming'),
+      successTitle: t('messages.resumed'),
+      errorTitle: t('messages.resumeFailed'),
       action: async () => {
         const res = await axios.post(`/api/replays/${liveKey}/resume`)
         setBackendOnline(true)
@@ -765,17 +667,15 @@ function App() {
 
   const handleDeleteReplayFile = async (r: Replay) => {
     const ok = window.confirm(
-      lang === 'en'
-        ? 'Delete the local video file? This will not delete the DB record.'
-        : '确定要删除这条录播对应的本地视频文件吗？不会删除数据库记录，只是把文件删掉。',
+      t('messages.deleteConfirm'),
     )
     if (!ok) return
     const res = await toastAction({
-      loadingTitle: lang === 'en' ? 'Deleting…' : '正在删除…',
-      loadingMessage: lang === 'en' ? 'Removing local file.' : '正在删除本地文件。',
-      successTitle: lang === 'en' ? 'Deleted' : '已删除',
-      successMessage: lang === 'en' ? 'Local file deleted.' : '本地文件已删除。',
-      errorTitle: lang === 'en' ? 'Delete failed' : '删除失败',
+      loadingTitle: t('messages.deleting'),
+      loadingMessage: t('messages.removingLocal'),
+      successTitle: t('messages.deleted'),
+      successMessage: t('messages.localDeleted'),
+      errorTitle: t('messages.deleteFailed'),
       action: () => axios.post(`/api/replays/${r.live_key}/delete-file`),
     })
     const updated = res.data as Replay
@@ -785,11 +685,11 @@ function App() {
 
   const handleCacheM3U8 = async (r: Replay) => {
     const res = await toastAction({
-      loadingTitle: lang === 'en' ? 'Caching…' : '正在缓存…',
-      loadingMessage: lang === 'en' ? 'Fetching m3u8.' : '正在拉取并缓存 m3u8。',
-      successTitle: lang === 'en' ? 'Cached' : '已缓存',
-      successMessage: lang === 'en' ? 'Saved latest m3u8.' : '已保存最新的 m3u8。',
-      errorTitle: lang === 'en' ? 'Cache failed' : '缓存失败',
+      loadingTitle: t('messages.caching'),
+      loadingMessage: t('messages.fetchingM3u8'),
+      successTitle: t('messages.cached'),
+      successMessage: t('messages.savedM3u8'),
+      errorTitle: t('messages.cacheFailed'),
       action: () => axios.post(`/api/replays/${r.live_key}/cache-m3u8`),
     })
     const updated = res.data as Replay
@@ -828,7 +728,7 @@ function App() {
       setBackendOnline(true)
     } catch (e) {
       setBackendOnline(false)
-      showToast({ tone: 'error', title: lang === 'en' ? 'List failed' : '读取目录失败', message: getErrorMessage(e) })
+      showToast({ tone: 'error', title: t('messages.listFailed'), message: getErrorMessage(e) })
     } finally {
       setDirLoading(false)
     }
@@ -838,9 +738,19 @@ function App() {
     if (!config) return
     setSavingConfig(true)
     try {
+      const prevDir = loadedConfigRef.current?.download?.output_dir || ''
+      const dirChanged = prevDir && prevDir !== config.download.output_dir
+      if (dirChanged) {
+        const confirmDir = window.confirm(t('messages.dirChangePrompt'))
+        if (!confirmDir) {
+          setSavingConfig(false)
+          return
+        }
+      }
+
       const prevTpl = loadedConfigRef.current?.download?.filename_template || ''
       const tplChanged = prevTpl && prevTpl !== config.download.filename_template
-      const renameExisting = tplChanged ? window.confirm(texts.renamePrompt) : false
+      const renameExisting = tplChanged ? window.confirm(t('messages.renamePrompt')) : false
       const res = await axios.post('/api/config', config, { params: { rename_existing: renameExisting ? 1 : 0 } })
       const migrated = parseInt(res.headers?.['x-migrated-files'] || '0')
       const renamed = parseInt(res.headers?.['x-renamed-files'] || '0')
@@ -851,18 +761,16 @@ function App() {
       if (migrated > 0 || renamed > 0) {
         showToast({
           tone: 'success',
-          title: lang === 'en' ? 'Saved' : '已保存',
+          title: t('messages.saved'),
           message:
-            lang === 'en'
-              ? `Moved ${migrated}, Renamed ${renamed}.`
-              : `搬迁 ${migrated} 个文件，重命名 ${renamed} 个文件。`,
+            t('messages.migratedRenamed', { 'migrated': migrated, 'renamed': renamed }),
         })
       } else {
-        showToast({ tone: 'success', title: lang === 'en' ? 'Saved' : '已保存' })
+        showToast({ tone: 'success', title: t('messages.saved') })
       }
     } catch (e) {
       setBackendOnline(false)
-      showToast({ tone: 'error', title: lang === 'en' ? 'Save failed' : '保存失败', message: getErrorMessage(e) })
+      showToast({ tone: 'error', title: t('messages.saveFailed'), message: getErrorMessage(e) })
       fetchConfig()
     } finally {
       setSavingConfig(false)
@@ -871,10 +779,10 @@ function App() {
 
   const runtimePills = useMemo(() => {
     const pills: JSX.Element[] = []
-    pills.push(<StatusPill key="backend" label={backendOnline ? texts.backendOnline : texts.backendOffline} tone={backendOnline ? 'good' : 'bad'} />)
-    if (paused) pills.push(<StatusPill key="paused" label={texts.paused} tone="neutral" />)
+    pills.push(<StatusPill key="backend" label={backendOnline ? t('dashboard.backendOnline') : t('dashboard.backendOffline')} tone={backendOnline ? 'good' : 'bad'} />)
+    if (paused) pills.push(<StatusPill key="paused" label={t('common.paused')} tone="neutral" />)
     return pills
-  }, [backendOnline, paused, texts])
+  }, [backendOnline, paused, t])
 
   return (
     <div className="min-h-screen bg-neutral-100 text-slate-800">
@@ -934,14 +842,14 @@ function App() {
               className={`w-full flex items-center px-3 py-2 text-sm font-medium rounded-md ${page === 'downloads' ? 'bg-stone-100 text-[var(--color-bili-blue)]' : 'text-slate-700 hover:bg-slate-50'}`}
             >
               <LayoutDashboard className="w-5 h-5 mr-3" />
-              {texts.downloads}
+              {t('common.downloads')}
             </button>
             <button
               onClick={() => { setPage('settings'); setSidebarOpen(false) }}
               className={`w-full flex items-center px-3 py-2 text-sm font-medium rounded-md ${page === 'settings' ? 'bg-stone-100 text-[var(--color-bili-blue)]' : 'text-slate-700 hover:bg-slate-50'}`}
             >
               <Settings className="w-5 h-5 mr-3" />
-              {texts.settings}
+              {t('common.settings')}
             </button>
 
             <div className="pt-4">
@@ -960,7 +868,7 @@ function App() {
                     <div className="text-sm font-semibold truncate">{me?.logged_in ? (me?.uname || '-') : '-'}</div>
                     <div className="text-xs text-slate-500 flex items-center gap-2">
                       <span className={`inline-block w-2 h-2 rounded-full ${me?.logged_in ? 'bg-green-500' : 'bg-slate-400'}`}></span>
-                      {me?.logged_in ? texts.loggedIn : texts.notLoggedIn}
+                      {me?.logged_in ? t('common.loggedIn') : t('common.notLoggedIn')}
                     </div>
                   </div>
                 </div>
@@ -968,42 +876,42 @@ function App() {
               {config?.download?.output_dir ? (
                 <div className="mt-3 rounded-xl border border-slate-200 bg-white p-3">
                   <div className="flex items-center justify-between gap-3">
-                    <div className="text-sm font-semibold">{lang === 'en' ? 'Disk' : '磁盘统计'}</div>
+                    <div className="text-sm font-semibold">{t('dashboard.disk')}</div>
                     <button
                       onClick={fetchDiskStats}
                       disabled={diskStatsLoading || !backendOnline}
                       className="text-xs px-2 py-1 rounded border border-slate-200 hover:bg-slate-50 disabled:opacity-50"
                     >
-                      {diskStatsLoading ? (lang === 'en' ? 'Loading…' : '读取中…') : (lang === 'en' ? 'Refresh' : '刷新')}
+                      {diskStatsLoading ? (t('dashboard.loading')) : (t('common.refresh'))}
                     </button>
                   </div>
                   <div className="mt-2 space-y-1 text-xs text-slate-600">
                     {diskStats ? (
                       <>
                         <div className="flex items-center justify-between gap-3">
-                          <span>{lang === 'en' ? 'Total' : '总容量'}</span>
+                          <span>{t('dashboard.total')}</span>
                           <span className="font-mono">{formatBytes(diskStats.total_bytes)}</span>
                         </div>
                         <div className="flex items-center justify-between gap-3">
-                          <span>{lang === 'en' ? 'Free' : '剩余'}</span>
+                          <span>{t('dashboard.free')}</span>
                           <span className="font-mono">{formatBytes(diskStats.free_bytes)}</span>
                         </div>
                         <div className="flex items-center justify-between gap-3">
-                          <span>{lang === 'en' ? 'Used by this app' : '本服务占用'}</span>
+                          <span>{t('dashboard.usedByApp')}</span>
                           <span className="font-mono">{formatBytes(diskStats.used_by_service_bytes)}</span>
                         </div>
                       </>
                     ) : (
-                      <div className="text-slate-400">{lang === 'en' ? 'No data' : '暂无数据'}</div>
+                      <div className="text-slate-400">{t('dashboard.noData')}</div>
                     )}
                   </div>
                 </div>
               ) : null}
               <button
-                onClick={() => setLang(lang === 'en' ? 'zh' : 'en')}
+                onClick={() => { const nextLang = lang === 'en' ? 'zh' : 'en'; i18n.changeLanguage(nextLang); localStorage.setItem('lang', nextLang); }}
                 className="mt-3 w-full flex items-center justify-center px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition"
               >
-                {lang === 'en' ? '中文' : 'EN'}
+                {lang === 'en' ? '中文 (ZH)' : 'English (EN)'}
               </button>
             </div>
           </nav>
@@ -1015,7 +923,7 @@ function App() {
               className="w-full flex items-center justify-center px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
             >
               {paused ? <Play className="w-4 h-4 mr-2" /> : <Pause className="w-4 h-4 mr-2" />}
-              {paused ? texts.resumeAll : texts.pauseAll}
+              {paused ? t('dashboard.resumeAll') : t('dashboard.pauseAll')}
             </button>
             <button
               onClick={handleCleanupStale}
@@ -1023,7 +931,15 @@ function App() {
               className="w-full flex items-center justify-center px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
             >
               <Wrench className="w-4 h-4 mr-2" />
-              {texts.fixStale}
+              {t('dashboard.fixStale')}
+            </button>
+            <button
+              onClick={handleCleanupStreams}
+              disabled={!backendOnline}
+              className="w-full flex items-center justify-center px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
+            >
+              <Eraser className="w-4 h-4 mr-2" />
+              {t('dashboard.cleanStreams')}
             </button>
           </div>
         </aside>
@@ -1042,8 +958,8 @@ function App() {
               <div className="max-w-6xl mx-auto">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
                   <div>
-                    <div className="text-2xl font-bold tracking-tight">{texts.downloadsTitle}</div>
-                    <div className="text-sm text-slate-500 mt-1">{texts.downloadsDesc}</div>
+                    <div className="text-2xl font-bold tracking-tight">{t('dashboard.downloadsTitle')}</div>
+                    <div className="text-sm text-slate-500 mt-1">{t('dashboard.downloadsDesc')}</div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <button
@@ -1051,10 +967,10 @@ function App() {
                       disabled={isRefreshing}
                       className="flex items-center px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
                     >
-                      <Tooltip content={texts.refreshTip}>
+                      <Tooltip content={t('dashboard.refreshTip')}>
                         <span className="inline-flex items-center">
                           <RefreshCcw className={`w-4 h-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
-                          {texts.refresh}
+                          {t('common.refresh')}
                         </span>
                       </Tooltip>
                     </button>
@@ -1063,10 +979,10 @@ function App() {
                       disabled={isScanning}
                       className="flex items-center px-3 py-2 bg-[var(--color-bili-blue)] text-white text-sm font-medium rounded-lg hover:opacity-90 transition disabled:opacity-50"
                     >
-                      <Tooltip content={texts.scanTip}>
+                      <Tooltip content={t('dashboard.scanTip')}>
                         <span className="inline-flex items-center">
                           <Loader2 className={`w-4 h-4 mr-2 ${isScanning ? 'animate-spin' : ''}`} />
-                          {texts.scan}
+                          {t('common.scan')}
                         </span>
                       </Tooltip>
                     </button>
@@ -1076,23 +992,62 @@ function App() {
                       className="flex items-center px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
                     >
                       <Download className="w-4 h-4 mr-2" />
-                      {isSyncingAll ? texts.syncing : texts.syncAllPending}
+                      {isSyncingAll ? t('dashboard.syncing') : t('dashboard.syncAllPending')}
                     </button>
+                    <div className="relative" ref={advancedMenuRef}>
+                      <button
+                        onClick={() => setShowAdvanced(!showAdvanced)}
+                        className={`flex items-center px-2 py-2 border text-sm font-medium rounded-lg transition ${showAdvanced ? 'bg-slate-100 border-slate-400 text-slate-800' : 'bg-white border-slate-300 text-slate-500 hover:bg-slate-50'}`}
+                      >
+                        <MoreHorizontal className="w-4 h-4" />
+                      </button>
+                      {showAdvanced && (
+                        <div className="absolute right-0 mt-2 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-[150] overflow-hidden py-1">
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={exportUseProxy}
+                            onClick={() => setExportUseProxy(!exportUseProxy)}
+                            className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
+                          >
+                            <span>{t('common.exportUseProxy', '本地代理流')}</span>
+                            <div className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${exportUseProxy ? 'bg-[var(--color-bili-blue)]' : 'bg-slate-300'}`}>
+                              <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform ${exportUseProxy ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
+                            </div>
+                          </button>
+                          <div className="h-px bg-slate-100 my-1 mx-2" />
+                          <button
+                            onClick={() => { window.open(`/api/export-tsv?proxy=${exportUseProxy}`, '_blank'); setShowAdvanced(false); }}
+                            className="w-full flex items-center px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
+                          >
+                            <Download className="w-4 h-4 mr-3 text-slate-400" />
+                            {t('common.export')}
+                          </button>
+                          <button
+                            onClick={() => { handleCopyExport(); setShowAdvanced(false); }}
+                            className="w-full flex items-center px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
+                          >
+                            <Copy className="w-4 h-4 mr-3 text-slate-400" />
+                            {t('common.copyExport')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
                   <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
-                    <div className="text-sm text-slate-500">{texts.records}</div>
+                    <div className="text-sm text-slate-500">{t('common.records')}</div>
                     <div className="text-2xl font-bold mt-1">{replays.length}</div>
                   </div>
                   <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
-                    <div className="text-sm text-slate-500">{texts.active}</div>
+                    <div className="text-sm text-slate-500">{t('common.active')}</div>
                     <div className="text-2xl font-bold mt-1">{activeDownloading}</div>
                   </div>
                   <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
-                    <div className="text-sm text-slate-500">{texts.mode}</div>
-                    <div className="text-2xl font-bold mt-1">{paused ? texts.paused : texts.running}</div>
+                    <div className="text-sm text-slate-500">{t('common.mode')}</div>
+                    <div className="text-2xl font-bold mt-1">{paused ? t('common.paused') : t('common.running')}</div>
                   </div>
                 </div>
 
@@ -1100,20 +1055,28 @@ function App() {
                   <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex items-center justify-between">
                     <h2 className="font-semibold flex items-center">
                       <Download className="w-5 h-5 text-slate-500 mr-2" />
-                      {texts.queue}
+                      {t('dashboard.queue')}
                     </h2>
                   </div>
 
                   <div className="divide-y divide-slate-100">
                     {replays.length === 0 && (
-                      <div className="text-center py-12 text-slate-500">{texts.empty}</div>
+                      <div className="text-center py-12 text-slate-500">{t('dashboard.empty')}</div>
                     )}
 
                     {replays.map(r => {
                       const p = progressMap[r.live_key]
                       const displayStatus = p?.status || r.status
-                      const displayProgress = Math.max(0, Math.min(100, p?.progress ?? r.progress ?? 0))
+                      const baseProgress = Math.max(0, Math.min(100, p?.progress ?? r.progress ?? 0))
                       const mergeProgress = Math.max(0, Math.min(100, p?.merge_progress ?? 0))
+
+                      let displayProgress = baseProgress
+                      if (displayStatus === 'downloading') {
+                        displayProgress = baseProgress * 0.95
+                      } else if (displayStatus === 'merging') {
+                        displayProgress = 95 + (mergeProgress * 0.05)
+                      }
+
                       const showProgress = ['downloading', 'merging', 'paused'].includes(displayStatus)
                       const progText = p?.message || r.message
                       const barColor =
@@ -1135,7 +1098,7 @@ function App() {
                               {r.local_cover ? (
                                 <img src={getCoverUrl(r.local_cover)!} className="w-full h-full object-cover" />
                               ) : (
-                                <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-400">No Cover</div>
+                                <div className="absolute inset-0 flex items-center justify-center text-xs text-slate-400">{t('dashboard.noCover')}</div>
                               )}
                             </div>
 
@@ -1161,10 +1124,10 @@ function App() {
                               </div>
 
                               <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
-                                <span>{texts.start}: {new Date(r.start_time * 1000).toLocaleString()}</span>
-                                <span>{texts.duration}: {Math.floor(r.duration / 60)}m</span>
-                                <span>{texts.size}: {formatBytes(r.file_size)}</span>
-                                {p?.speed ? <span>{texts.speed}: {p.speed}</span> : null}
+                                <span>{t('common.start')}: {new Date(r.start_time * 1000).toLocaleString()}</span>
+                                <span>{t('common.duration')}: {Math.floor(r.duration / 60)}m</span>
+                                <span>{t('common.size')}: {formatBytes(r.file_size)}</span>
+                                {p?.speed ? <span>{t('common.speed')}: {p.speed}</span> : null}
                               </div>
 
                               <div className="mt-3">
@@ -1187,7 +1150,7 @@ function App() {
                                       />
                                     </div>
                                     <div className="mt-1 flex justify-between text-[11px] text-slate-400">
-                                      <span className="truncate max-w-[70%]">{lang === 'en' ? 'Merge progress' : '合并进度'}</span>
+                                      <span className="truncate max-w-[70%]">{t('dashboard.mergeProgress')}</span>
                                       <span>{`${Math.round(mergeProgress)}%`}</span>
                                     </div>
                                   </div>
@@ -1202,7 +1165,7 @@ function App() {
                                   disabled={!backendOnline || paused}
                                   className="p-2 text-slate-500 hover:text-[var(--color-bili-blue)] rounded bg-white border border-slate-200 shadow-sm transition disabled:opacity-50"
                                 >
-                                  <Tooltip content={texts.startBtn}>
+                                  <Tooltip content={t('dashboard.startBtn')}>
                                     <Play className="w-4 h-4" />
                                   </Tooltip>
                                 </button>
@@ -1213,7 +1176,7 @@ function App() {
                                   disabled={!backendOnline}
                                   className="p-2 text-slate-500 hover:text-amber-500 rounded bg-white border border-slate-200 shadow-sm transition disabled:opacity-50"
                                 >
-                                  <Tooltip content={texts.pauseBtn}>
+                                  <Tooltip content={t('dashboard.pauseBtn')}>
                                     <Pause className="w-4 h-4" />
                                   </Tooltip>
                                 </button>
@@ -1224,7 +1187,7 @@ function App() {
                                   disabled={!backendOnline || paused}
                                   className="p-2 text-slate-500 hover:text-green-600 rounded bg-white border border-slate-200 shadow-sm transition disabled:opacity-50"
                                 >
-                                  <Tooltip content={texts.resumeBtn}>
+                                  <Tooltip content={t('dashboard.resumeBtn')}>
                                     <Play className="w-4 h-4" />
                                   </Tooltip>
                                 </button>
@@ -1233,7 +1196,7 @@ function App() {
                                 onClick={() => setSelectedReplay(r)}
                                 className="p-2 text-slate-500 hover:text-slate-800 rounded bg-white border border-slate-200 shadow-sm transition"
                               >
-                                <Tooltip content={texts.details}>
+                                <Tooltip content={t('common.details')}>
                                   <Wrench className="w-4 h-4" />
                                 </Tooltip>
                               </button>
@@ -1251,8 +1214,8 @@ function App() {
               <div className="max-w-4xl mx-auto">
                 <div className="flex items-center justify-between mb-6">
                   <div>
-                    <div className="text-2xl font-bold tracking-tight">{texts.configTitle}</div>
-                    <div className="text-sm text-slate-500 mt-1">{texts.configDesc}</div>
+                    <div className="text-2xl font-bold tracking-tight">{t('settings.configTitle')}</div>
+                    <div className="text-sm text-slate-500 mt-1">{t('settings.configDesc')}</div>
                   </div>
                   <button
                     onClick={handleSaveConfig}
@@ -1260,14 +1223,14 @@ function App() {
                     className="flex items-center px-4 py-2 bg-[var(--color-bili-pink)] hover:opacity-90 text-white rounded-lg font-medium transition disabled:opacity-50"
                   >
                     <RefreshCcw className={`w-4 h-4 mr-2 ${savingConfig ? 'animate-spin' : ''}`} />
-                    {savingConfig ? texts.saving : texts.save}
+                    {savingConfig ? t('settings.saving') : t('common.save')}
                   </button>
                 </div>
 
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-6">
                   <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex items-center">
                     <Settings className="w-5 h-5 text-slate-500 mr-2" />
-                    <h2 className="font-semibold">{texts.systemConfig}</h2>
+                    <h2 className="font-semibold">{t('settings.systemConfig')}</h2>
                   </div>
 
                   {!config ? (
@@ -1275,7 +1238,7 @@ function App() {
                   ) : (
                     <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">{texts.anchorId}</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">{t('settings.anchorId')}</label>
                         <input
                           value={config.bilibili.anchor_id || 0}
                           onChange={e => setConfig({ ...config, bilibili: { ...config.bilibili, anchor_id: parseInt(e.target.value || '0') } })}
@@ -1284,7 +1247,7 @@ function App() {
                       </div>
 
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">{texts.outputDir}</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">{t('settings.outputDir')}</label>
                         <div className="flex gap-2">
                           <input
                             value={config.download.output_dir || ''}
@@ -1297,14 +1260,14 @@ function App() {
                             disabled={!backendOnline}
                             className="px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
                           >
-                            {texts.browse}
+                            {t('common.browse')}
                           </button>
                         </div>
-                        <div className="text-xs text-slate-500 mt-1">{texts.outputTip}</div>
+                        <div className="text-xs text-slate-500 mt-1">{t('settings.outputTip')}</div>
                       </div>
 
                       <div className="md:col-span-2">
-                        <label className="block text-sm font-medium text-slate-700 mb-1">{texts.filenameTpl}</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">{t('settings.filenameTpl')}</label>
                         <input
                           value={config.download.filename_template || ''}
                           onChange={e => setConfig({ ...config, download: { ...config.download, filename_template: e.target.value } })}
@@ -1316,7 +1279,7 @@ function App() {
                       </div>
 
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">{texts.maxTasks}</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">{t('settings.maxTasks')}</label>
                         <input
                           value={config.download.max_concurrent_tasks || 1}
                           onChange={e => setConfig({ ...config, download: { ...config.download, max_concurrent_tasks: parseInt(e.target.value || '1') } })}
@@ -1325,7 +1288,7 @@ function App() {
                       </div>
 
                       <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">{texts.segConc}</label>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">{t('settings.segConc')}</label>
                         <input
                           value={config.download.concurrent_segments || 1}
                           onChange={e => setConfig({ ...config, download: { ...config.download, concurrent_segments: parseInt(e.target.value || '1') } })}
@@ -1345,7 +1308,7 @@ function App() {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full overflow-hidden">
             <div className="p-6 border-b flex justify-between items-center">
-              <h3 className="text-xl font-bold text-gray-900">{texts.detailsTitle}</h3>
+              <h3 className="text-xl font-bold text-gray-900">{t('dashboard.detailsTitle')}</h3>
               <button onClick={() => setSelectedReplay(null)} className="text-gray-400 hover:text-gray-600">✕</button>
             </div>
             <div className="p-6 space-y-6">
@@ -1355,49 +1318,49 @@ function App() {
                 )}
                 <div className="grid grid-cols-2 gap-x-8 gap-y-4 flex-1">
                   <div>
-                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{texts.status}</label>
+                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.status')}</label>
                     <p className="capitalize font-medium">{selectedReplay.status}</p>
                   </div>
                   <div>
-                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{texts.startTime}</label>
+                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.startTime')}</label>
                     <p className="text-sm">{new Date(selectedReplay.start_time * 1000).toLocaleString()}</p>
                   </div>
                   <div>
-                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{texts.endTime}</label>
+                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.endTime')}</label>
                     <p className="text-sm">{new Date(selectedReplay.end_time * 1000).toLocaleString()}</p>
                   </div>
                   <div>
-                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Duration</label>
-                    <p className="text-sm">{Math.floor(selectedReplay.duration / 60)} min {selectedReplay.duration % 60} sec</p>
+                    <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.duration')}</label>
+                    <p className="text-sm">{Math.floor(selectedReplay.duration / 60)} {t('common.min')} {selectedReplay.duration % 60} {t('common.sec')}</p>
                   </div>
                 </div>
               </div>
 
               <div className="grid grid-cols-3 gap-4 p-4 bg-gray-50 rounded-lg">
                 <div>
-                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{texts.resolution}</label>
+                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.resolution')}</label>
                   <p className="font-medium">{selectedReplay.resolution || 'N/A'}</p>
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{texts.bitrate}</label>
+                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.bitrate')}</label>
                   <p className="font-medium">{selectedReplay.bitrate || 'N/A'}</p>
                 </div>
                 <div>
-                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{texts.fileSize}</label>
+                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.fileSize')}</label>
                   <p className="font-medium">{formatBytes(selectedReplay.file_size)}</p>
                 </div>
               </div>
               
               <div>
-                <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Current Message / Error</label>
+                <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('dashboard.currentMessage')}</label>
                 <div className={`mt-1 p-3 rounded bg-gray-50 font-mono text-sm border ${selectedReplay.status === 'failed' ? 'border-red-100 text-red-600 bg-red-50' : 'border-gray-100'}`}>
-                  {progressMap[selectedReplay.live_key]?.message || selectedReplay.message || 'No message available'}
+                  {progressMap[selectedReplay.live_key]?.message || selectedReplay.message || '-'}
                 </div>
               </div>
 
               {selectedReplay.file_path && (
                 <div>
-                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{texts.localPath}</label>
+                  <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.localPath')}</label>
                   <p className="text-xs font-mono break-all mt-1 bg-gray-50 p-2 rounded border border-gray-100">{selectedReplay.file_path}</p>
                 </div>
               )}
@@ -1411,20 +1374,20 @@ function App() {
                       disabled={!backendOnline}
                       className="px-3 py-1.5 bg-white border border-gray-200 text-xs font-medium rounded hover:bg-gray-50 transition disabled:opacity-50"
                     >
-                      {lang === 'en' ? 'Cache' : '缓存'}
+                      {t('dashboard.cache')}
                     </button>
                     <button
                       onClick={() => setM3u8Open(v => !v)}
                       className="px-3 py-1.5 bg-white border border-gray-200 text-xs font-medium rounded hover:bg-gray-50 transition"
                     >
-                      {m3u8Open ? (lang === 'en' ? 'Hide' : '收起') : (lang === 'en' ? 'Show' : '展开')}
+                      {m3u8Open ? (t('dashboard.hide')) : (t('dashboard.show'))}
                     </button>
                   </div>
                 </div>
                 {m3u8Open ? (
                   <div className="mt-3 space-y-3">
                     {(selectedReplay.streams || []).length === 0 ? (
-                      <div className="text-xs text-gray-400">{lang === 'en' ? 'No streams cached yet.' : '还没有缓存到 streams/m3u8。'}</div>
+                      <div className="text-xs text-gray-400">{t('dashboard.noStreams')}</div>
                     ) : (
                       (selectedReplay.streams || []).map((s, idx) => (
                         <div key={idx} className="bg-white border border-gray-100 rounded-lg p-3">
@@ -1449,13 +1412,13 @@ function App() {
                   disabled={!backendOnline || !selectedReplay.file_path}
                   className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors shadow-sm disabled:opacity-50"
                 >
-                  {lang === 'en' ? 'Delete File' : '删除文件'}
+                  {t('dashboard.deleteFile')}
                 </button>
                 <button
                   onClick={() => setSelectedReplay(null)}
                   className="px-8 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
                 >
-                  {texts.close}
+                  {t('common.close')}
                 </button>
               </div>
             </div>
@@ -1467,20 +1430,20 @@ function App() {
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-2xl overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
-              <div className="font-semibold">{texts.chooseDir}</div>
+              <div className="font-semibold">{t('dashboard.chooseDir')}</div>
               <button className="p-2 rounded hover:bg-slate-100" onClick={() => setDirModalOpen(false)}>
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="px-6 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between gap-3">
-              <div className="text-sm text-slate-600 truncate">{dirCurrent || texts.drives}</div>
+              <div className="text-sm text-slate-600 truncate">{dirCurrent || t('dashboard.drives')}</div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => loadDirList(dirParent)}
                   disabled={dirLoading || (!dirParent && !!dirCurrent)}
                   className="px-3 py-1.5 bg-white border border-slate-300 text-sm font-medium rounded hover:bg-slate-50 transition disabled:opacity-50"
                 >
-                  {texts.up}
+                  {t('common.up')}
                 </button>
               </div>
             </div>
@@ -1499,12 +1462,12 @@ function App() {
                       <div className="text-xs text-slate-400 truncate ml-4">{en.path}</div>
                     </button>
                   ))}
-                  {dirEntries.length === 0 && <div className="p-6 text-slate-500">{texts.noSubfolders}</div>}
+                  {dirEntries.length === 0 && <div className="p-6 text-slate-500">{t('dashboard.noSubfolders')}</div>}
                 </div>
               )}
             </div>
             <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex justify-between items-center">
-              <div className="text-xs text-slate-500 truncate">{dirCurrent ? `${texts.selected}: ${dirCurrent}` : ''}</div>
+              <div className="text-xs text-slate-500 truncate">{dirCurrent ? `${t('common.selected')}: ${dirCurrent}` : ''}</div>
               <button
                 onClick={() => {
                   if (!config || !dirCurrent) return
@@ -1514,7 +1477,7 @@ function App() {
                 disabled={!config || !dirCurrent}
                 className="px-4 py-2 bg-[var(--color-bili-blue)] text-white rounded-lg font-medium hover:opacity-90 transition disabled:opacity-50"
               >
-                {texts.useFolder}
+                {t('common.useFolder')}
               </button>
             </div>
           </div>

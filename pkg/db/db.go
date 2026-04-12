@@ -47,6 +47,7 @@ func ReplaceReplayStreams(replayID int, streams []model.StreamSlice) error {
 			return nil
 		}
 		for i := range streams {
+			streams[i].ID = 0
 			streams[i].ReplayID = replayID
 		}
 		return tx.Create(&streams).Error

@@ -19,6 +19,7 @@ import (
 	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/pkg/config"
 	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/pkg/db"
 	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/pkg/downloader"
+	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/pkg/utils"
 	"go.uber.org/zap"
 )
 
@@ -146,6 +147,16 @@ func (w *Worker) Run() (api.ScanSummary, error) {
 			db.SaveReplay(existing)
 			w.logger.Info("Added new replay to DB", zap.String("live_key", r.LiveKey), zap.String("title", r.Title))
 			sum.NewRecords++
+
+			// Auto cache M3U8 so the user doesn't have to manually click the button later
+			go func(key string) {
+				time.Sleep(2 * time.Second)
+				_, err := w.CacheReplayM3U8(key)
+				if err != nil {
+					w.logger.Error("Failed to auto-cache M3U8 for new replay", zap.String("live_key", key), zap.Error(err))
+				}
+			}(r.LiveKey)
+			
 			continue
 		}
 
@@ -190,29 +201,43 @@ func (w *Worker) Run() (api.ScanSummary, error) {
 		}
 
 		markedDeleted := false
-		if existing.Status == "completed" {
-			resolved := resolveReplayFilePath(w.cfg.Download.OutputDir, existing.LiveKey, existing.FilePath)
-			if resolved != "" && existing.FilePath != resolved {
+		if existing.Status == "completed" || existing.Status == "deleted" {
+			resolved, ok := utils.ResolveReplayFilePath(w.cfg.Download.OutputDir, existing.LiveKey, existing.FilePath)
+			if ok && resolved != "" && existing.FilePath != resolved {
 				existing.FilePath = resolved
 				updated = true
 			}
-			if resolved == "" {
-				existing.Status = "deleted"
-				existing.VerifyOk = false
-				existing.Message = "Downloaded before but file path is unknown or missing. You can re-download."
-				updated = true
-				markedDeleted = true
-			} else if _, err := os.Stat(resolved); err != nil {
-				if found := findReplayFileByLiveKey(w.cfg.Download.OutputDir, existing.LiveKey); found != "" {
-					existing.FilePath = found
-					updated = true
-				} else {
+			if resolved == "" || !ok {
+				if existing.Status == "completed" {
 					existing.Status = "deleted"
 					existing.VerifyOk = false
-					existing.Message = "Downloaded before but file was deleted locally. You can re-download."
+					existing.Message = "Downloaded before but file path is unknown or missing. You can re-download."
 					updated = true
 					markedDeleted = true
 				}
+			} else if _, err := os.Stat(resolved); err != nil {
+				if found, okFound := utils.FindReplayFileByLiveKey(w.cfg.Download.OutputDir, existing.LiveKey); okFound && found != "" {
+					existing.FilePath = found
+					if existing.Status == "deleted" {
+						existing.Status = "completed"
+						existing.VerifyOk = true
+						existing.Message = "Success"
+					}
+					updated = true
+				} else {
+					if existing.Status == "completed" {
+						existing.Status = "deleted"
+						existing.VerifyOk = false
+						existing.Message = "Downloaded before but file was deleted locally. You can re-download."
+						updated = true
+						markedDeleted = true
+					}
+				}
+			} else if existing.Status == "deleted" {
+				existing.Status = "completed"
+				existing.VerifyOk = true
+				existing.Message = "Success"
+				updated = true
 			}
 		}
 		if updated {
@@ -232,37 +257,6 @@ func (w *Worker) Run() (api.ScanSummary, error) {
 	return sum, nil
 }
 
-func resolveReplayFilePath(outputDir string, liveKey string, filePath string) string {
-	fp := strings.TrimSpace(filePath)
-	if fp == "" {
-		return findReplayFileByLiveKey(outputDir, liveKey)
-	}
-	if filepath.IsAbs(fp) {
-		return fp
-	}
-	if strings.TrimSpace(outputDir) == "" {
-		return fp
-	}
-	return filepath.Join(outputDir, fp)
-}
-
-func findReplayFileByLiveKey(outputDir string, liveKey string) string {
-	if strings.TrimSpace(outputDir) == "" || strings.TrimSpace(liveKey) == "" {
-		return ""
-	}
-	patterns := []string{
-		filepath.Join(outputDir, "*"+liveKey+"*.mp4"),
-		filepath.Join(outputDir, "*"+liveKey+"*.mkv"),
-		filepath.Join(outputDir, "*"+liveKey+"*.flv"),
-	}
-	for _, pat := range patterns {
-		matches, _ := filepath.Glob(pat)
-		if len(matches) > 0 {
-			return matches[0]
-		}
-	}
-	return ""
-}
 
 func (w *Worker) DownloadReplay(liveKey string) {
 	replay, err := db.GetReplayByLiveKey(liveKey)
@@ -418,6 +412,12 @@ func normalizeM3U8URL(raw string) string {
 		return s
 	}
 	q := u.Query()
+	start := q.Get("start_time")
+	end := q.Get("end_time")
+	stream := q.Get("stream_name")
+	if start != "" && end != "" && stream != "" {
+		return fmt.Sprintf("%s_%s_%s", start, end, stream)
+	}
 	q.Del("ts")
 	q.Del("sign")
 	u.RawQuery = q.Encode()
@@ -583,6 +583,8 @@ func (w *Worker) processReplay(replay *model.BilibiliReplay) {
 		}
 		return
 	}
+	streams = dedupeStreamsByM3U8URL(streams)
+	_ = db.ReplaceReplayStreams(replay.ReplayID, streams)
 	replay.Streams = streams
 	replay.Status = "downloading"
 	replay.Message = "Starting download..."
@@ -647,6 +649,31 @@ func (w *Worker) processReplay(replay *model.BilibiliReplay) {
 		replay.Message = fmt.Sprintf("Duration mismatch: expected %d, got %.1f", replay.Duration, dur)
 	}
 	db.SaveReplay(replay)
+}
+
+func (w *Worker) CleanupDuplicateStreams() (int, error) {
+	replays, err := db.GetReplays()
+	if err != nil {
+		w.logger.Error("Failed to fetch replays for stream cleanup", zap.Error(err))
+		return 0, err
+	}
+	cleaned := 0
+	for i := range replays {
+		if len(replays[i].Streams) == 0 {
+			continue
+		}
+		origLen := len(replays[i].Streams)
+		deduped := dedupeStreamsByM3U8URL(replays[i].Streams)
+		if len(deduped) < origLen {
+			if err := db.ReplaceReplayStreams(replays[i].ReplayID, deduped); err == nil {
+				cleaned += (origLen - len(deduped))
+			}
+		}
+	}
+	if cleaned > 0 {
+		w.logger.Info("Cleaned up duplicate streams", zap.Int("count", cleaned))
+	}
+	return cleaned, nil
 }
 
 func (w *Worker) CleanupStaleDownloadingNow() (int, error) {

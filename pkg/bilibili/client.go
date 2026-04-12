@@ -26,6 +26,9 @@ func NewClient(liveUID int, cookies map[string]string, cookieFile string) *Clien
 	client.SetCookieJar(jar)
 	client.SetBaseURL("https://api.live.bilibili.com")
 	client.SetTimeout(20 * time.Second)
+	client.SetRetryCount(3)
+	client.SetRetryWaitTime(2 * time.Second)
+	client.SetRetryMaxWaitTime(10 * time.Second)
 
 	client.SetHeaders(map[string]string{
 		"accept":          "*/*",

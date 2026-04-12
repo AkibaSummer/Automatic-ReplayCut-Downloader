@@ -1,13 +1,13 @@
 //go:build !windows
 
-package api
+package utils
 
 import (
 	"path/filepath"
 	"syscall"
 )
 
-func getDiskTotalFree(path string) (uint64, uint64, error) {
+func GetDiskTotalFree(path string) (uint64, uint64, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path
@@ -20,4 +20,3 @@ func getDiskTotalFree(path string) (uint64, uint64, error) {
 	free := uint64(st.Bavail) * uint64(st.Bsize)
 	return total, free, nil
 }
-

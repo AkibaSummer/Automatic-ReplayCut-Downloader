@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/internal/model"
 	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/pkg/api"
+	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/pkg/utils"
 )
 
 type Engine struct {
@@ -61,7 +61,7 @@ func (e *Engine) DownloadReplayWithContext(ctx context.Context, replay model.Bil
 		return "", fmt.Errorf("no streams found for replay %s", replay.LiveKey)
 	}
 
-	finalFilename := sanitizeFilename(renderFilenameTemplate(e.FilenameTemplate, replay))
+	finalFilename := utils.SanitizeFilename(utils.RenderFilenameTemplate(e.FilenameTemplate, replay))
 	if !strings.HasSuffix(strings.ToLower(finalFilename), ".mp4") {
 		finalFilename += ".mp4"
 	}
@@ -221,16 +221,25 @@ func (e *Engine) DownloadReplayWithContext(ctx context.Context, replay model.Bil
 		}
 	}
 
-	concatListPath := filepath.Join(e.TempDir, fmt.Sprintf("%s_concat.txt", replay.LiveKey))
+	localM3U8Path := filepath.Join(e.TempDir, fmt.Sprintf("%s_local.m3u8", replay.LiveKey))
 	var listContent strings.Builder
+	listContent.WriteString("#EXTM3U\n")
+	listContent.WriteString("#EXT-X-VERSION:3\n")
+	listContent.WriteString("#EXT-X-TARGETDURATION:10\n")
+	listContent.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	for idx, f := range allSegmentFiles {
 		absPath, _ := filepath.Abs(f)
-		listContent.WriteString(fmt.Sprintf("file '%s'\n", strings.ReplaceAll(absPath, "\\", "/")))
 		if idx < len(allSegmentDurations) && allSegmentDurations[idx] > 0 {
-			listContent.WriteString(fmt.Sprintf("duration %.6f\n", allSegmentDurations[idx]))
+			listContent.WriteString(fmt.Sprintf("#EXTINF:%.6f,\n", allSegmentDurations[idx]))
+		} else {
+			listContent.WriteString("#EXTINF:10.000000,\n")
 		}
+		pathUrl := strings.ReplaceAll(absPath, "\\", "/")
+		listContent.WriteString(fmt.Sprintf("%s\n", pathUrl))
 	}
-	if err := os.WriteFile(concatListPath, []byte(listContent.String()), 0644); err != nil {
+	listContent.WriteString("#EXT-X-ENDLIST\n")
+
+	if err := os.WriteFile(localM3U8Path, []byte(listContent.String()), 0644); err != nil {
 		return "", err
 	}
 
@@ -241,13 +250,8 @@ func (e *Engine) DownloadReplayWithContext(ctx context.Context, replay model.Bil
 
 	if err := e.runFFmpegWithMergeProgress(ctx, replay.LiveKey, []string{
 		"-y",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", concatListPath,
-		"-fflags", "+genpts",
-		"-avoid_negative_ts", "make_zero",
-		"-max_interleave_delta", "0",
-		"-movflags", "+faststart",
+		"-allowed_extensions", "ALL",
+		"-i", localM3U8Path,
 		"-c", "copy",
 		"-bsf:a", "aac_adtstoasc",
 		"-progress", "pipe:1",
@@ -309,13 +313,8 @@ func (e *Engine) DownloadReplayWithContext(ctx context.Context, replay model.Bil
 		_ = os.Remove(fixPath)
 		if err := e.runFFmpegWithMergeProgress(ctx, replay.LiveKey, []string{
 			"-y",
-			"-f", "concat",
-			"-safe", "0",
-			"-i", concatListPath,
-			"-fflags", "+genpts",
-			"-avoid_negative_ts", "make_zero",
-			"-max_interleave_delta", "0",
-			"-movflags", "+faststart",
+			"-allowed_extensions", "ALL",
+			"-i", localM3U8Path,
 			"-c:v", "libx264",
 			"-preset", "veryfast",
 			"-crf", "20",
@@ -341,7 +340,7 @@ func (e *Engine) DownloadReplayWithContext(ctx context.Context, replay model.Bil
 	}
 
 	// 5. Cleanup (only after a verified merge)
-	_ = os.Remove(concatListPath)
+	_ = os.Remove(localM3U8Path)
 	for _, d := range streamTempDirs {
 		_ = os.RemoveAll(d)
 	}
@@ -621,55 +620,11 @@ func (e *Engine) VerifyDuration(filePath string, expectedSeconds int) (bool, flo
 		diff = -diff
 	}
 
-	// 1 minute margin = 60 seconds
-	return diff <= 60, duration, nil
-}
-
-func sanitizeFilename(name string) string {
-	// Simple sanitizer for Windows/Linux
-	badChars := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
-	for _, char := range badChars {
-		name = strings.ReplaceAll(name, char, "_")
+	margin := 60.0 + float64(expectedSeconds)*0.02
+	if margin > 600.0 {
+		margin = 600.0 // Max 10 minutes tolerance
 	}
-	return name
+
+	return diff <= margin, duration, nil
 }
 
-var (
-	startLayoutRe = regexp.MustCompile(`\{start:([^}]+)\}`)
-	endLayoutRe   = regexp.MustCompile(`\{end:([^}]+)\}`)
-)
-
-func renderFilenameTemplate(tpl string, replay model.BilibiliReplay) string {
-	start := time.Unix(replay.StartTime, 0)
-	end := time.Unix(replay.EndTime, 0)
-
-	out := tpl
-
-	out = startLayoutRe.ReplaceAllStringFunc(out, func(m string) string {
-		sub := startLayoutRe.FindStringSubmatch(m)
-		if len(sub) != 2 {
-			return m
-		}
-		return start.Format(sub[1])
-	})
-	out = endLayoutRe.ReplaceAllStringFunc(out, func(m string) string {
-		sub := endLayoutRe.FindStringSubmatch(m)
-		if len(sub) != 2 {
-			return m
-		}
-		return end.Format(sub[1])
-	})
-
-	out = strings.ReplaceAll(out, "{title}", replay.Title)
-	out = strings.ReplaceAll(out, "{live_key}", replay.LiveKey)
-	out = strings.ReplaceAll(out, "{yyyy}", fmt.Sprintf("%04d", start.Year()))
-	out = strings.ReplaceAll(out, "{yy}", start.Format("06"))
-	out = strings.ReplaceAll(out, "{MM}", start.Format("01"))
-	out = strings.ReplaceAll(out, "{dd}", start.Format("02"))
-	out = strings.ReplaceAll(out, "{start}", start.Format("2006-01-02 15-04-05"))
-	out = strings.ReplaceAll(out, "{end}", end.Format("2006-01-02 15-04-05"))
-	out = strings.ReplaceAll(out, "{start_unix}", fmt.Sprintf("%d", replay.StartTime))
-	out = strings.ReplaceAll(out, "{end_unix}", fmt.Sprintf("%d", replay.EndTime))
-
-	return strings.TrimSpace(out)
-}
