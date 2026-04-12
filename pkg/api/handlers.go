@@ -200,11 +200,23 @@ func (r *RouterCtx) HandleUpdateConfig(c *gin.Context) {
 	oldCfg := *r.Config
 	oldOutputDir := oldCfg.Download.OutputDir
 	
+	// Preserve system parameters not exposed/sent by UI
+	newCfg.Server = oldCfg.Server
+	if newCfg.Database.DSN == "" {
+		newCfg.Database = oldCfg.Database
+	}
+
 	if newCfg.Bilibili.Cookies == nil {
 		newCfg.Bilibili.Cookies = oldCfg.Bilibili.Cookies
 	}
 	if newCfg.Bilibili.CookieFile == "" {
 		newCfg.Bilibili.CookieFile = oldCfg.Bilibili.CookieFile
+	}
+	// Do not override AnchorID if it is 0 explicitly submitted by user unless they didn't send it? 
+	// Wait, actually, if the user leaves AnchorID blank, it becomes 0, which is valid (prompts them to set it).
+	
+	if newCfg.Download.OutputDir == "" {
+		newCfg.Download.OutputDir = oldCfg.Download.OutputDir
 	}
 	if newCfg.Download.TempDir == "" {
 		newCfg.Download.TempDir = oldCfg.Download.TempDir
@@ -503,6 +515,30 @@ func HandleResumeAll(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Resumed"})
 }
 
+func HandleDownloadUnfinished(c *gin.Context) {
+	if workerInstance == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Worker not initialized"})
+		return
+	}
+	if err := workerInstance.DownloadUnfinished(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Downloading unfinished"})
+}
+
+func HandleRetryAllFailed(c *gin.Context) {
+	if workerInstance == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Worker not initialized"})
+		return
+	}
+	if err := workerInstance.RetryAllFailed(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Retrying failed tasks"})
+}
+
 func HandleDownloadReplay(c *gin.Context) {
 	liveKey := c.Param("live_key")
 	if workerInstance != nil {
@@ -666,4 +702,31 @@ func HandlePreviewM3U8(c *gin.Context) {
 	}
 
 	c.Data(http.StatusOK, "application/vnd.apple.mpegurl", []byte(stream.M3U8Text))
+}
+
+// Auth Handlers
+func HandleGenerateQR(c *gin.Context) {
+	url, key, err := workerInstance.GenerateQR()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"url":        url,
+		"qrcode_key": key,
+	})
+}
+
+func HandlePollQR(c *gin.Context) {
+	key := c.Query("qrcode_key")
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "qrcode_key is required"})
+		return
+	}
+	code, err := workerInstance.PollQR(key)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"code": code})
 }

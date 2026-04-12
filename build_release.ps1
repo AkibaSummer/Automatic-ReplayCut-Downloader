@@ -29,18 +29,25 @@ $ENV:GOARCH = "amd64"
 go build -ldflags="-w -s" -o "$RELEASE_DIR/$APP_NAME" cmd/main.go
 Write-Host "Go engine compiled successfully!" -ForegroundColor Green
 
-Write-Host "5. Downloading FFmpeg executable..." -ForegroundColor Cyan
-Write-Host "Downloading from Github ($FFMPEG_URL)... This may take a minute."
-Invoke-WebRequest -Uri $FFMPEG_URL -OutFile $FFMPEG_ZIP
+Write-Host "5. Preparing FFmpeg executable..." -ForegroundColor Cyan
+if (-not (Test-Path $FFMPEG_ZIP)) {
+    Write-Host "Downloading from Github ($FFMPEG_URL)... This may take a minute."
+    Invoke-WebRequest -Uri $FFMPEG_URL -OutFile $FFMPEG_ZIP
+} else {
+    Write-Host "Using cached $FFMPEG_ZIP..." -ForegroundColor Green
+}
 
 Write-Host "Extracting FFmpeg..."
 Expand-Archive -Path $FFMPEG_ZIP -DestinationPath "temp_ffmpeg" -Force
 
 $FFMPEG_EXE = Get-ChildItem -Path "temp_ffmpeg" -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
+$FFPROBE_EXE = Get-ChildItem -Path "temp_ffmpeg" -Filter "ffprobe.exe" -Recurse | Select-Object -First 1
 Copy-Item $FFMPEG_EXE.FullName -Destination "$RELEASE_DIR/ffmpeg.exe"
+if ($null -ne $FFPROBE_EXE) {
+    Copy-Item $FFPROBE_EXE.FullName -Destination "$RELEASE_DIR/ffprobe.exe"
+}
 
 Remove-Item -Recurse -Force "temp_ffmpeg"
-Remove-Item -Force $FFMPEG_ZIP
 
 Write-Host "6. Zipping Final Release..." -ForegroundColor Cyan
 $ZIP_NAME = "BilibiliReplayManager_Windows_Bundle.zip"

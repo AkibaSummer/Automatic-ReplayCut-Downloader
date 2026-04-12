@@ -24,11 +24,15 @@ type WorkerInterface interface {
 	PauseReplay(liveKey string) (bool, error)
 	ResumeReplay(liveKey string) error
 	CacheReplayM3U8(liveKey string) (*model.BilibiliReplay, error)
+	GenerateQR() (string, string, error)
+	PollQR(qrcodeKey string) (int, error)
 	GetMe() (Me, error)
 	CleanupStaleDownloadingNow() (int, error)
 	CleanupDuplicateStreams() (int, error)
 	PauseAll() (int, error)
 	ResumeAll() error
+	DownloadUnfinished() error
+	RetryAllFailed() error
 	GetRuntime() Runtime
 }
 
@@ -116,6 +120,8 @@ func StartServer(cfg *config.Config) error {
 		apiGroup.GET("/config", ctx.HandleGetConfig)
 		apiGroup.GET("/me", HandleGetMe)
 		apiGroup.GET("/avatar", HandleGetAvatar)
+		apiGroup.GET("/login/qr", HandleGenerateQR)
+		apiGroup.GET("/login/poll", HandlePollQR)
 		apiGroup.POST("/config", ctx.HandleUpdateConfig)
 		apiGroup.GET("/replays", ctx.HandleGetReplays)
 		apiGroup.GET("/export-tsv", HandleExportTsv)
@@ -126,6 +132,8 @@ func StartServer(cfg *config.Config) error {
 		apiGroup.POST("/cleanup-streams", HandleCleanupStreams)
 		apiGroup.POST("/pause-all", HandlePauseAll)
 		apiGroup.POST("/resume-all", HandleResumeAll)
+		apiGroup.POST("/download-unfinished", HandleDownloadUnfinished)
+		apiGroup.POST("/retry-failed", HandleRetryAllFailed)
 		apiGroup.POST("/replays/:live_key/download", HandleDownloadReplay)
 		apiGroup.POST("/replays/:live_key/pause", HandlePauseReplay)
 		apiGroup.POST("/replays/:live_key/resume", HandleResumeReplay)

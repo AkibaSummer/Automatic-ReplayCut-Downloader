@@ -30,12 +30,7 @@ func main() {
 	w := worker.NewWorker(cfg, logger)
 	api.SetWorker(w)
 
-	// Start login check if not logged in
-	go func() {
-		if err := w.EnsureLoggedIn(); err != nil {
-			logger.Error("login failed", zap.Error(err))
-		}
-	}()
+
 
 	// Start background scanning
 	w.Start()

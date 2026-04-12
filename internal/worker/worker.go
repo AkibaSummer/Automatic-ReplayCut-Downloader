@@ -57,6 +57,18 @@ func NewWorker(cfg *config.Config, logger *zap.Logger) *Worker {
 	}
 }
 
+func (w *Worker) syncEngineConfig() {
+	if w.cfg == nil {
+		return
+	}
+	w.biliClient.SetLiveUID(w.cfg.Bilibili.AnchorID)
+	w.downloadEngine.OutputDir = w.cfg.Download.OutputDir
+	w.downloadEngine.TempDir = w.cfg.Download.TempDir
+	w.downloadEngine.FilenameTemplate = w.cfg.Download.FilenameTemplate
+	w.downloadEngine.ConcurrentSegments = w.cfg.Download.ConcurrentSegments
+	w.limiter.SetLimit(w.cfg.Download.MaxConcurrentTasks)
+}
+
 func (w *Worker) Start() {
 	// 1. Recover stuck tasks in background with a small delay
 	// to ensure web server and websocket broadcaster are ready
@@ -111,6 +123,7 @@ func (w *Worker) Recover() {
 }
 
 func (w *Worker) Run() (api.ScanSummary, error) {
+	w.syncEngineConfig()
 	sum := api.ScanSummary{}
 	if !w.biliClient.IsLoggedIn() {
 		w.logger.Warn("Bilibili not logged in, skipping scan")
@@ -130,9 +143,9 @@ func (w *Worker) Run() (api.ScanSummary, error) {
 		existing, _ := db.GetReplayByLiveKey(r.LiveKey)
 
 		if existing == nil {
-			// New item, save to DB as pending
+			// New item, save to DB as not_downloaded
 			existing = &r
-			existing.Status = "pending"
+			existing.Status = "not_downloaded"
 			existing.Message = "Found new replay"
 
 			// Download cover
@@ -259,12 +272,14 @@ func (w *Worker) Run() (api.ScanSummary, error) {
 
 
 func (w *Worker) DownloadReplay(liveKey string) {
-	replay, err := db.GetReplayByLiveKey(liveKey)
-	if err != nil {
-		w.logger.Error("Replay not found in DB", zap.String("live_key", liveKey))
-		return
-	}
-	w.processReplay(replay)
+	go func() {
+		replay, err := db.GetReplayByLiveKey(liveKey)
+		if err != nil {
+			w.logger.Error("Replay not found in DB", zap.String("live_key", liveKey))
+			return
+		}
+		w.processReplay(replay)
+	}()
 }
 
 func (w *Worker) PauseReplay(liveKey string) (bool, error) {
@@ -305,12 +320,60 @@ func (w *Worker) ResumeReplay(liveKey string) error {
 	if err != nil || replay == nil {
 		return err
 	}
-	if replay.Status == "paused" {
+	if replay.Status == "paused" || replay.Status == "not_downloaded" || replay.Status == "failed" || replay.Status == "deleted" {
 		replay.Status = "pending"
-		replay.Message = "Resumed"
+		replay.Message = "Queued"
 		db.SaveReplay(replay)
 	}
-	go w.processReplay(replay)
+	w.DownloadReplay(liveKey) // Ensure we use DownloadReplay which spawns the routine instead of calling processReplay directly
+	return nil
+}
+
+func (w *Worker) DownloadUnfinished() error {
+	replays, err := db.GetReplays()
+	if err != nil {
+		return err
+	}
+
+	for _, r := range replays {
+		if r.Status == "not_downloaded" {
+			r.Status = "pending"
+			r.Message = "Queued"
+			db.SaveReplay(&r)
+
+			api.ProgressCh <- api.ProgressUpdate{
+				LiveKey:  r.LiveKey,
+				Progress: r.Progress,
+				Status:   "pending",
+				Message:  r.Message,
+			}
+			w.DownloadReplay(r.LiveKey)
+		}
+	}
+	return nil
+}
+
+func (w *Worker) RetryAllFailed() error {
+	replays, err := db.GetReplays()
+	if err != nil {
+		return err
+	}
+
+	for _, r := range replays {
+		if r.Status == "failed" {
+			r.Status = "pending"
+			r.Message = "Retrying"
+			db.SaveReplay(&r)
+
+			api.ProgressCh <- api.ProgressUpdate{
+				LiveKey:  r.LiveKey,
+				Progress: 0,
+				Status:   "pending",
+				Message:  r.Message,
+			}
+			w.DownloadReplay(r.LiveKey)
+		}
+	}
 	return nil
 }
 
@@ -424,13 +487,7 @@ func normalizeM3U8URL(raw string) string {
 	return u.String()
 }
 
-func (w *Worker) EnsureLoggedIn() error {
-	if w.biliClient.IsLoggedIn() {
-		return nil
-	}
-	w.logger.Warn("Bilibili not logged in, starting login flow...")
-	return w.biliClient.LoginWithQRCode()
-}
+
 
 func (w *Worker) SyncAll() {
 	replays, err := db.GetReplays()
@@ -441,9 +498,9 @@ func (w *Worker) SyncAll() {
 
 	w.logger.Info("Starting sync all pending tasks", zap.Int("total", len(replays)))
 	for i := range replays {
-		if replays[i].Status == "pending" || replays[i].Status == "failed" || replays[i].Status == "deleted" {
+		if replays[i].Status == "pending" {
 			w.logger.Info("Syncing task", zap.String("live_key", replays[i].LiveKey))
-			w.processReplay(&replays[i])
+			w.DownloadReplay(replays[i].LiveKey) // DownloadReplay natively spawns routine now
 		}
 	}
 	w.logger.Info("Sync all pending tasks finished")
@@ -485,29 +542,12 @@ func (w *Worker) processReplay(replay *model.BilibiliReplay) {
 
 	w.logger.Info("Processing replay", zap.String("live_key", replay.LiveKey), zap.String("title", replay.Title))
 
-	w.downloadEngine.OutputDir = w.cfg.Download.OutputDir
-	w.downloadEngine.TempDir = w.cfg.Download.TempDir
-	w.downloadEngine.FilenameTemplate = w.cfg.Download.FilenameTemplate
-	w.downloadEngine.ConcurrentSegments = w.cfg.Download.ConcurrentSegments
-	w.limiter.SetLimit(w.cfg.Download.MaxConcurrentTasks)
+	w.syncEngineConfig()
 
 	w.pausedMu.Lock()
 	paused := w.pausedReplays[replay.LiveKey]
 	w.pausedMu.Unlock()
 	if paused {
-		replay.Status = "paused"
-		replay.Message = "Paused"
-		db.SaveReplay(replay)
-		api.ProgressCh <- api.ProgressUpdate{
-			LiveKey:  replay.LiveKey,
-			Progress: replay.Progress,
-			Status:   "paused",
-			Message:  replay.Message,
-		}
-		return
-	}
-
-	if w.limiter.IsPaused() {
 		replay.Status = "paused"
 		replay.Message = "Paused"
 		db.SaveReplay(replay)
@@ -529,8 +569,15 @@ func (w *Worker) processReplay(replay *model.BilibiliReplay) {
 		Status:   "pending",
 		Message:  replay.Message,
 	}
-	if err := w.limiter.Acquire(context.Background()); err != nil {
-		if errors.Is(err, ErrPaused) {
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w.cancelMu.Lock()
+	w.cancels[replay.LiveKey] = cancel
+	w.cancelMu.Unlock()
+	// NOTE: cancel will be deleted in the big defer block at the top of processReplay!
+
+	if err := w.limiter.Acquire(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
 			replay.Status = "paused"
 			replay.Message = "Paused"
 			db.SaveReplay(replay)
@@ -554,11 +601,6 @@ func (w *Worker) processReplay(replay *model.BilibiliReplay) {
 		return
 	}
 	defer w.limiter.Release()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	w.cancelMu.Lock()
-	w.cancels[replay.LiveKey] = cancel
-	w.cancelMu.Unlock()
 
 	replay.Status = "pending"
 	replay.Message = "Fetching stream list..."
@@ -598,14 +640,56 @@ func (w *Worker) processReplay(replay *model.BilibiliReplay) {
 		Message:  "Initializing download...",
 	}
 
-	filePath, err := w.downloadEngine.DownloadReplayWithContext(ctx, *replay)
+	var filePath string
+	maxRetries := 3
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		filePath, err = w.downloadEngine.DownloadReplayWithContext(ctx, *replay)
+		if err == nil {
+			break
+		}
+		
+		w.logger.Error("Download failed", zap.String("live_key", replay.LiveKey), zap.Error(err), zap.Int("attempt", attempt))
+		
+		if errors.Is(err, context.Canceled) {
+			break
+		}
+
+		if attempt < maxRetries {
+			backoffSec := attempt * 5
+			replay.Message = fmt.Sprintf("Download failed. Retrying (%d/%d) in %ds...", attempt, maxRetries, backoffSec)
+			progress := replay.Progress
+			if cur, e := db.GetReplayByLiveKey(replay.LiveKey); e == nil && cur != nil {
+				progress = cur.Progress
+			}
+			api.ProgressCh <- api.ProgressUpdate{
+				LiveKey:  replay.LiveKey,
+				Progress: progress,
+				Status:   "downloading",
+				Message:  replay.Message,
+			}
+
+			// Respect cancellation during backoff
+			timer := time.NewTimer(time.Duration(backoffSec) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				err = ctx.Err()
+			case <-timer.C:
+			}
+			
+			if err != nil && errors.Is(err, context.Canceled) {
+				break
+			}
+		}
+	}
+
 	if err != nil {
-		w.logger.Error("Download failed", zap.String("live_key", replay.LiveKey), zap.Error(err))
 		progress := replay.Progress
 		if cur, e := db.GetReplayByLiveKey(replay.LiveKey); e == nil && cur != nil {
 			progress = cur.Progress
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(err, ErrPaused) {
+		if errors.Is(err, context.Canceled) {
 			replay.Status = "paused"
 			replay.Message = "Paused"
 		} else {
@@ -726,20 +810,57 @@ func (w *Worker) GetMe() (api.Me, error) {
 	}
 	u, err := w.biliClient.GetCurrentUser()
 	if err != nil {
-		return api.Me{LoggedIn: true}, err
+		if strings.Contains(err.Error(), "bilibili api error") {
+			return api.Me{LoggedIn: false}, err // Token aggressively expired by B站
+		}
+		return api.Me{LoggedIn: true}, err // Just a network timeout, preserve state
 	}
 	return api.Me{LoggedIn: true, Uname: u.Uname, Face: u.Face}, nil
 }
 
+func (w *Worker) GenerateQR() (string, string, error) {
+	return w.biliClient.GenerateQR()
+}
+
+func (w *Worker) PollQR(qrcodeKey string) (int, error) {
+	code, err := w.biliClient.PollQR(qrcodeKey)
+	if err == nil && code == 0 {
+		w.logger.Info("Login success via QR code, cookies updated")
+	}
+	return code, err
+}
+
 func (w *Worker) PauseAll() (int, error) {
-	w.limiter.Pause()
+	replays, err := db.GetReplays()
+	if err != nil {
+		return 0, err
+	}
+
+	w.pausedMu.Lock()
+	count := 0
+	for i := range replays {
+		r := replays[i]
+		if r.Status == "pending" || r.Status == "downloading" || r.Status == "failed" {
+			w.pausedReplays[r.LiveKey] = true
+			r.Status = "paused"
+			r.Message = "Paused"
+			db.SaveReplay(&r)
+
+			api.ProgressCh <- api.ProgressUpdate{
+				LiveKey:  r.LiveKey,
+				Progress: r.Progress,
+				Status:   "paused",
+				Message:  r.Message,
+			}
+			count++
+		}
+	}
+	w.pausedMu.Unlock()
 
 	w.cancelMu.Lock()
-	count := 0
 	for liveKey, cancel := range w.cancels {
 		cancel()
 		delete(w.cancels, liveKey)
-		count++
 	}
 	w.cancelMu.Unlock()
 
@@ -747,13 +868,61 @@ func (w *Worker) PauseAll() (int, error) {
 }
 
 func (w *Worker) ResumeAll() error {
-	w.limiter.Resume()
+	replays, err := db.GetReplays()
+	if err != nil {
+		return err
+	}
+	
+	var toResume []string
+
+	w.pausedMu.Lock()
+	for i := range replays {
+		r := replays[i]
+		if r.Status == "paused" {
+			w.pausedReplays[r.LiveKey] = false
+			r.Status = "pending"
+			r.Message = "Resumed"
+			db.SaveReplay(&r)
+
+			api.ProgressCh <- api.ProgressUpdate{
+				LiveKey:  r.LiveKey,
+				Progress: r.Progress,
+				Status:   "pending",
+				Message:  r.Message,
+			}
+			toResume = append(toResume, r.LiveKey)
+		}
+	}
+	w.pausedMu.Unlock()
+
+	// Spin up actual background coroutines outside the lock
+	for _, liveKey := range toResume {
+		w.DownloadReplay(liveKey)
+	}
+
 	return nil
 }
 
 func (w *Worker) GetRuntime() api.Runtime {
+	replays, err := db.GetReplays()
+	paused := true // Assume paused unless we find an active one
+	if err == nil {
+		activeCount := 0
+		pausedCount := 0
+		for _, r := range replays {
+			if r.Status == "pending" || r.Status == "downloading" || r.Status == "failed" {
+				activeCount++
+			} else if r.Status == "paused" {
+				pausedCount++
+			}
+		}
+		if activeCount > 0 || pausedCount == 0 {
+			paused = false // If anything is active, or nothing is even paused, state is not 'Globally Paused'
+		}
+	}
+
 	return api.Runtime{
-		Paused:             w.limiter.IsPaused(),
+		Paused:             paused,
 		MaxConcurrentTasks: w.cfg.Download.MaxConcurrentTasks,
 		ConcurrentSegments: w.cfg.Download.ConcurrentSegments,
 	}

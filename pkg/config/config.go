@@ -36,9 +36,11 @@ func LoadConfig() (*Config, error) {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	viper.AutomaticEnv()
 
-	// Default values
 	viper.SetDefault("database.dsn", "replays.db")
 	viper.SetDefault("server.port", 8081)
+	viper.SetDefault("bilibili.cookie_file", "cookies.json")
+	viper.SetDefault("download.output_dir", "downloads")
+	viper.SetDefault("download.temp_dir", "temp")
 	viper.SetDefault("download.filename_template", "{yy}-{MM}-{dd} {start:150405} {title}.mp4")
 	viper.SetDefault("download.max_concurrent_tasks", 2)
 	viper.SetDefault("download.concurrent_segments", 5)

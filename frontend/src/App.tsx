@@ -2,6 +2,7 @@ import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 're
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import axios from 'axios'
+import { QRCodeSVG } from 'qrcode.react'
 import {
   Download,
   LayoutDashboard,
@@ -226,6 +227,88 @@ function Tooltip({ content, children }: { content: ReactNode; children: ReactNod
 type ToastTone = 'loading' | 'success' | 'error' | 'info'
 type Toast = { id: number; tone: ToastTone; title: string; message?: string }
 
+
+function LoginModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+  const { t } = useTranslation()
+  const [url, setUrl] = useState('')
+  const [key, setKey] = useState('')
+  const [statusText, setStatusText] = useState('')
+  const [errorText, setErrorText] = useState('')
+
+  const fetchQR = useCallback(async () => {
+    try {
+      const res = await axios.get('/api/login/qr')
+      setUrl(res.data.url)
+      setKey(res.data.qrcode_key)
+      setStatusText(t('common.loginScanWait'))
+      setErrorText('')
+    } catch (err: any) {
+      setErrorText(t('common.loginFailed') + ' ' + getErrorMessage(err))
+    }
+  }, [t])
+
+  useEffect(() => {
+    fetchQR()
+  }, [fetchQR])
+
+  useEffect(() => {
+    if (!key) return
+    const interval = setInterval(async () => {
+      try {
+        const res = await axios.get(`/api/login/poll?qrcode_key=${key}`)
+        const code = res.data.code
+        if (code === 0) {
+          setStatusText(t('common.loginSuccess'))
+          clearInterval(interval)
+          setTimeout(() => onSuccess(), 1000)
+        } else if (code === 86090) {
+          setStatusText(t('common.loginScanConfirm'))
+        } else if (code === 86038) {
+          setErrorText(t('common.loginExpired'))
+          clearInterval(interval)
+        }
+      } catch (err: any) {}
+    }, 2000)
+    return () => clearInterval(interval)
+  }, [key, onSuccess, t])
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm sm:p-6">
+      <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col pt-6 pb-8 px-6 relative">
+        <button
+          onClick={onClose}
+          className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition"
+        >
+          <X className="w-5 h-5" />
+        </button>
+        <h2 className="text-xl font-bold text-slate-800 text-center mb-6">{t('common.loginTitle')}</h2>
+        <div className="flex flex-col items-center">
+          {url ? (
+            <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-sm mb-4">
+              <QRCodeSVG value={url} size={200} level="L" />
+            </div>
+          ) : (
+            <div className="w-[232px] h-[232px] mb-4 bg-slate-100 animate-pulse rounded-xl" />
+          )}
+          {errorText ? (
+            <div className="text-red-500 text-sm text-center font-medium mb-4">{errorText}</div>
+          ) : (
+            <div className="text-slate-600 text-sm text-center font-medium mb-4">{statusText}</div>
+          )}
+          {errorText && (
+            <button
+              onClick={fetchQR}
+              className="px-4 py-2 bg-[var(--color-bili-blue)] text-white text-sm font-medium rounded-lg hover:brightness-110 transition active:scale-95"
+            >
+              {t('common.loginRefresh')}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const { t, i18n } = useTranslation()
   const lang = i18n.language
@@ -276,6 +359,7 @@ function App() {
   const [dirParent, setDirParent] = useState('')
   const [dirEntries, setDirEntries] = useState<FsEntry[]>([])
   const [dirLoading, setDirLoading] = useState(false)
+  const [showLoginModal, setShowLoginModal] = useState(false)
 
   const [diskStats, setDiskStats] = useState<DiskStats | null>(null)
   const [diskStatsLoading, setDiskStatsLoading] = useState(false)
@@ -626,6 +710,39 @@ function App() {
     })
   }
 
+  const handleRetryAllFailed = async () => {
+    await toastAction({
+      loadingTitle: t('dashboard.retryAllFailed'),
+      loadingMessage: t('messages.allowingTasks'),
+      successTitle: t('messages.resumed'),
+      errorTitle: t('messages.resumeFailed'),
+      action: async () => {
+        const res = await axios.post('/api/retry-failed')
+        setBackendOnline(true)
+        setPaused(false)
+        await fetchRuntime()
+        await fetchReplays({ notify: false })
+        return res
+      },
+    })
+  }
+
+  const handleDownloadUnfinished = async () => {
+    await toastAction({
+      loadingTitle: t('dashboard.syncAllPending'),
+      loadingMessage: t('messages.allowingTasks'),
+      successTitle: t('messages.resumed'),
+      errorTitle: t('messages.resumeFailed'),
+      action: async () => {
+        const res = await axios.post('/api/download-unfinished')
+        setBackendOnline(true)
+        await fetchRuntime()
+        await fetchReplays({ notify: false })
+        return res
+      },
+    })
+  }
+
   const handleDownload = async (liveKey: string) => {
     await toastAction({
       loadingTitle: t('messages.starting'),
@@ -868,7 +985,7 @@ function App() {
                     <div className="text-sm font-semibold truncate">{me?.logged_in ? (me?.uname || '-') : '-'}</div>
                     <div className="text-xs text-slate-500 flex items-center gap-2">
                       <span className={`inline-block w-2 h-2 rounded-full ${me?.logged_in ? 'bg-green-500' : 'bg-slate-400'}`}></span>
-                      {me?.logged_in ? t('common.loggedIn') : t('common.notLoggedIn')}
+                      {me?.logged_in ? t('common.loggedIn') : (<button onClick={() => setShowLoginModal(true)} className="hover:text-slate-800 underline decoration-slate-300 underline-offset-2 transition-colors">{t('common.login')}</button>)}
                     </div>
                   </div>
                 </div>
@@ -1159,7 +1276,7 @@ function App() {
                             </div>
 
                             <div className="flex flex-col gap-2">
-                              {['pending', 'failed', 'deleted'].includes(displayStatus) && (
+                              {['failed', 'deleted', 'not_downloaded'].includes(displayStatus) && (
                                 <button
                                   onClick={() => handleDownload(r.live_key)}
                                   disabled={!backendOnline || paused}
@@ -1170,7 +1287,7 @@ function App() {
                                   </Tooltip>
                                 </button>
                               )}
-                              {(displayStatus === 'downloading' || displayStatus === 'merging') && (
+                              {(displayStatus === 'downloading' || displayStatus === 'merging' || displayStatus === 'pending') && (
                                 <button
                                   onClick={() => handlePauseReplay(r.live_key)}
                                   disabled={!backendOnline}
@@ -1483,7 +1600,8 @@ function App() {
           </div>
         </div>
       )}
-    </div>
+    {showLoginModal && <LoginModal onClose={() => setShowLoginModal(false)} onSuccess={() => { setShowLoginModal(false); fetchMe(); }} />}
+      </div>
   )
 }
 

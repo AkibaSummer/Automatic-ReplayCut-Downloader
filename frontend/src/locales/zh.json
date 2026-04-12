@@ -14,6 +14,7 @@
     "details": "详情",
     "status": "状态",
     "duration": "时长",
+    "not_downloaded": "未下载",
     "size": "大小",
     "speed": "速度",
     "startTime": "开始时间",
@@ -34,7 +35,16 @@
     "exportUseProxy": "本地代理流",
     "cleaning": "清理中...",
     "min": "分",
-    "sec": "秒"
+    "sec": "秒",
+    "face": "头像",
+    "login": "登录 B站",
+    "loginTitle": "B站 扫码登录",
+    "loginScanWait": "请使用哔哩哔哩移动客户端扫码登录",
+    "loginScanConfirm": "扫描成功！请在手机上确认登录...",
+    "loginSuccess": "登录成功！",
+    "loginExpired": "二维码已过期，请刷新",
+    "loginFailed": "登录失败:",
+    "loginRefresh": "刷新二维码"
   },
   "dashboard": {
     "downloadsTitle": "下载",

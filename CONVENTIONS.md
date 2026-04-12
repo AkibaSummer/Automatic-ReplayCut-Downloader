@@ -80,3 +80,12 @@
 - **多语言国际化 (i18n Strictness)**:
   - **所有的** UI 提示内容（包括但不限于弹窗 Toast、按钮文案、兜底的错误提示文字如“Copy Failed”，以及模态框的标题和空状态等）必须通过 `t('...')` 获取，并在对应的 `zh.json` 与 `en.json` 中定义好。
   - 严禁在页面结构或状态更新逻辑中直接硬编码中文/英文字符串。即使是拼装的字符串（如“共清理了 xx 条”）也推荐使用 i18n 的插值 `{t('key', { count })}` 来实现。
+
+## 10. 状态机与防越权断言 (State Machine Integrity)
+- **绝对隔离原则**: `not_downloaded` 和 `failed` 状态属于特殊的沙盒（Sandbox）状态。
+  - `not_downloaded` 作为被动初始化的默认态，防止新录播大规模突发下载占用网络。
+  - `failed` 作为放弃态，绝不可能被“重新同步（SyncAll）”或“全部继续（ResumeAll）”等操作卷入排队。
+- **添加新状态的规范**: 若未来需要拓展新的 DB Status（如 `archived` 或 `exporting`），开发者**必须**同步执行以下前端绑定：
+  1. 在 `frontend/src/locales/` 下分别建立完整的字典映射。
+  2. 在 `frontend/src/App.tsx` 中将其合并到 `statusColor(status)` 的 UI Badge 颜色返回方法中。
+  3. 审查它在 `['pending', 'failed', 'deleted', 'not_downloaded'].includes(displayStatus)` 单项操作（开始/暂停/恢复）动态判定数组中的行为边界。如果缺失，控制控件将直接渲染失效或完全丢失。

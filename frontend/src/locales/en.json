@@ -14,6 +14,7 @@
     "details": "Details",
     "status": "Status",
     "duration": "Duration",
+    "not_downloaded": "Not Downloaded",
     "size": "Size",
     "speed": "Speed",
     "startTime": "Start Time",
@@ -34,7 +35,16 @@
     "exportUseProxy": "Local Proxy Stream",
     "cleaning": "Cleaning...",
     "min": "min",
-    "sec": "sec"
+    "sec": "sec",
+    "face": "Face",
+    "login": "Login",
+    "loginTitle": "Bilibili QR Code Login",
+    "loginScanWait": "Please scan the QR code using your Bilibili App",
+    "loginScanConfirm": "QR scanned! Please confirm on your phone...",
+    "loginSuccess": "Login Successful!",
+    "loginExpired": "QR code expired, please refresh",
+    "loginFailed": "Login Failed:",
+    "loginRefresh": "Refresh QR Code"
   },
   "dashboard": {
     "downloadsTitle": "Downloads",

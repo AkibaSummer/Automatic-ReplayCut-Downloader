@@ -23,6 +23,22 @@ import (
 	"github.com/AkibaSummer/Automatic-ReplayCut-Downloader/pkg/utils"
 )
 
+func resolveExe(name string) string {
+	if ex, err := os.Executable(); err == nil {
+		dir := filepath.Dir(ex)
+		paths := []string{
+			filepath.Join(dir, name),
+			filepath.Join(dir, name+".exe"),
+		}
+		for _, p := range paths {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+	return name
+}
+
 type Engine struct {
 	OutputDir          string
 	TempDir            string
@@ -415,7 +431,7 @@ func (e *Engine) parseM3U8(ctx context.Context, url string) ([]string, []float64
 }
 
 func (e *Engine) runFFmpegWithMergeProgress(ctx context.Context, liveKey string, args []string, expectedSeconds float64) error {
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd := exec.CommandContext(ctx, resolveExe("ffmpeg"), args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -527,7 +543,7 @@ type FileInfo struct {
 
 func (e *Engine) GetFileInfo(filePath string) (FileInfo, error) {
 	// ffprobe -v error -show_entries format=size,bit_rate -show_entries stream=width,height -of json <file>
-	cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=size,bit_rate", "-show_entries", "stream=width,height", "-of", "json", filePath)
+	cmd := exec.Command(resolveExe("ffprobe"), "-v", "error", "-show_entries", "format=size,bit_rate", "-show_entries", "stream=width,height", "-of", "json", filePath)
 	output, err := cmd.Output()
 	if err != nil {
 		return FileInfo{}, err
@@ -572,7 +588,7 @@ func (e *Engine) DownloadCover(url string, liveKey string) (string, error) {
 	localPath := filepath.Join(e.OutputDir, "covers", filename)
 
 	// Use curl or http client
-	cmd := exec.Command("curl", "-L", "-o", localPath, url)
+	cmd := exec.Command(resolveExe("curl"), "-L", "-o", localPath, url)
 	if err := cmd.Run(); err != nil {
 		return "", err
 	}
@@ -582,7 +598,7 @@ func (e *Engine) DownloadCover(url string, liveKey string) (string, error) {
 
 func (e *Engine) VerifyDuration(filePath string, expectedSeconds int) (bool, float64, error) {
 	// ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 -of json <file>
-	cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", filePath)
+	cmd := exec.Command(resolveExe("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "json", filePath)
 	output, err := cmd.Output()
 	if err != nil {
 		return false, 0, err

@@ -71,6 +71,10 @@ func NewClient(liveUID int, cookies map[string]string, cookieFile string) *Clien
 	}
 }
 
+func (c *Client) SetLiveUID(uid int) {
+	c.liveUID = uid
+}
+
 func (c *Client) SaveCookies() error {
 	if c.cookieFile == "" {
 		return nil
