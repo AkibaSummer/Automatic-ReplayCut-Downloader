@@ -58,26 +58,7 @@ if (Test-Path "runtime") {
     Copy-Item -Path "runtime" -Destination $PORTABLE_DIR -Recurse -Force
 }
 
-Write-Host "5. Preparing FFmpeg tools..." -ForegroundColor Cyan
-$FFMPEG_ZIP = "ffmpeg-release.zip"
-if (-not (Test-Path $FFMPEG_ZIP)) {
-    throw "Missing ffmpeg bundle: $FFMPEG_ZIP"
-}
-$FFMPEG_TEMP = Join-Path $RELEASE_DIR "ffmpeg-temp"
-if (Test-Path $FFMPEG_TEMP) {
-    Remove-Item -Recurse -Force $FFMPEG_TEMP
-}
-Expand-Archive -Path $FFMPEG_ZIP -DestinationPath $FFMPEG_TEMP -Force
-$FFMPEG_EXE = Get-ChildItem -Path $FFMPEG_TEMP -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
-$FFPROBE_EXE = Get-ChildItem -Path $FFMPEG_TEMP -Filter "ffprobe.exe" -Recurse | Select-Object -First 1
-if ($null -eq $FFMPEG_EXE -or $null -eq $FFPROBE_EXE) {
-    throw "Failed to locate ffmpeg.exe or ffprobe.exe in $FFMPEG_ZIP"
-}
-Copy-Item -Path $FFMPEG_EXE.FullName -Destination (Join-Path $PORTABLE_DIR "ffmpeg.exe") -Force
-Copy-Item -Path $FFPROBE_EXE.FullName -Destination (Join-Path $PORTABLE_DIR "ffprobe.exe") -Force
-Remove-Item -Recurse -Force $FFMPEG_TEMP
-
-Write-Host "6. Zipping final release..." -ForegroundColor Cyan
+Write-Host "5. Zipping final release..." -ForegroundColor Cyan
 $ZIP_PATH = Join-Path $RELEASE_DIR $ZIP_NAME
 If (Test-Path $ZIP_PATH) {
     Remove-Item -Force $ZIP_PATH

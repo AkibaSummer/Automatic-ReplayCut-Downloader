@@ -1,11 +1,11 @@
-import { spawn } from 'node:child_process'
+import { createReadStream, createWriteStream } from 'node:fs'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import http from 'node:http'
 import path from 'node:path'
-import readline from 'node:readline'
 
 import express, { type Response } from 'express'
+import { parseFile } from 'music-metadata'
 import initSqlJs, { type BindParams, type Database as SqlDatabase } from 'sql.js'
 import YAML from 'yaml'
 import { WebSocketServer } from 'ws'
@@ -1752,137 +1752,79 @@ class DesktopBackend {
   }
 
   private async runFfmpegMerge(liveKey: string, inputM3U8: string, outputPath: string, expectedSeconds: number, signal: AbortSignal) {
-    const ffmpegPath = await this.resolveExecutable('ffmpeg')
+    const segments = await this.parseM3U8(inputM3U8)
+    let totalBytes = 0
+    for (const seg of segments) {
+      const localPath = decodeURI(new URL(seg.url).pathname).replace(/\//g, path.sep)
+      const fullPath = path.join(path.dirname(inputM3U8), path.basename(localPath))
+      if (fs.existsSync(fullPath)) {
+        totalBytes += fs.statSync(fullPath).size
+      }
+    }
+
+    const outStream = createWriteStream(outputPath)
+    let written = 0
+
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        ffmpegPath,
-        [
-          '-y',
-          '-allowed_extensions',
-          'ALL',
-          '-i',
-          inputM3U8,
-          '-c',
-          'copy',
-          '-bsf:a',
-          'aac_adtstoasc',
-          '-progress',
-          'pipe:1',
-          '-nostats',
-          outputPath,
-        ],
-        { windowsHide: true },
-      )
+      signal.addEventListener('abort', () => { outStream.close(); reject(new Error('aborted')) }, { once: true })
+      outStream.on('error', reject)
 
-      signal.addEventListener(
-        'abort',
-        () => {
-          child.kill()
-        },
-        { once: true },
-      )
-
-      const rl = readline.createInterface({ input: child.stdout })
-      rl.on('line', line => {
-        if (!line.startsWith('out_time_ms=')) return
-        const raw = line.slice('out_time_ms='.length)
-        const micro = Number.parseInt(raw, 10)
-        if (!Number.isFinite(micro)) return
-        const mergeProgress =
-          expectedSeconds > 0 ? Math.max(0, Math.min(100, (micro / (expectedSeconds * 1000000)) * 100)) : 0
-        this.emitProgress({
-          live_key: liveKey,
-          status: 'merging',
-          progress: 99,
-          merge_progress: mergeProgress,
-          message: `Merging... ${Math.round(mergeProgress)}%`,
+      const appendNext = (idx: number) => {
+        if (signal.aborted) return
+        if (idx >= segments.length) {
+          outStream.end(() => resolve())
+          return
+        }
+        const seg = segments[idx]
+        const localPath = decodeURI(new URL(seg.url).pathname).replace(/\//g, path.sep)
+        const fullPath = path.join(path.dirname(inputM3U8), path.basename(localPath))
+        if (!fs.existsSync(fullPath)) {
+          appendNext(idx + 1)
+          return
+        }
+        const rs = createReadStream(fullPath)
+        rs.on('data', (chunk: string | Buffer) => {
+          written += chunk.length
+          const mergeProgress = totalBytes > 0 ? Math.max(0, Math.min(100, (written / totalBytes) * 100)) : 0
+          this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: mergeProgress, message: `Merging... ${Math.round(mergeProgress)}%` })
         })
-      })
-
-      let stderr = ''
-      child.stderr.on('data', chunk => {
-        stderr += chunk.toString()
-      })
-      child.on('error', reject)
-      child.on('close', code => {
-        rl.close()
-        if (signal.aborted) {
-          reject(new Error('aborted'))
-          return
-        }
-        if (code === 0) {
-          resolve()
-          return
-        }
-        reject(new Error(stderr.trim() || `ffmpeg exited with code ${code}`))
-      })
+        rs.on('end', () => appendNext(idx + 1))
+        rs.on('error', reject)
+        rs.pipe(outStream, { end: false })
+      }
+      appendNext(0)
     })
   }
 
   private async verifyDuration(filePath: string, expectedSeconds: number) {
-    const ffprobePath = await this.resolveExecutable('ffprobe')
-    const output = await this.execFileCapture(ffprobePath, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', filePath])
-    const parsed = JSON.parse(output) as { format?: { duration?: string } }
-    const duration = Number.parseFloat(parsed?.format?.duration || '0') || 0
-    if (expectedSeconds <= 0) {
-      return { ok: duration > 0, duration }
+    if (!fs.existsSync(filePath)) return { ok: false, duration: 0 }
+    try {
+      const metadata = await parseFile(filePath)
+      const duration = metadata.format.duration || 0
+      if (expectedSeconds <= 0) return { ok: duration > 0, duration }
+      const diff = Math.abs(duration - expectedSeconds)
+      const margin = Math.min(600, 60 + expectedSeconds * 0.02)
+      return { ok: diff <= margin, duration }
+    } catch {
+      return { ok: false, duration: 0 }
     }
-    const diff = Math.abs(duration - expectedSeconds)
-    const margin = Math.min(600, 60 + expectedSeconds * 0.02)
-    return { ok: diff <= margin, duration }
   }
 
   private async getFileInfo(filePath: string): Promise<FileInfo> {
-    const ffprobePath = await this.resolveExecutable('ffprobe')
-    const output = await this.execFileCapture(ffprobePath, ['-v', 'error', '-show_entries', 'format=size,bit_rate', '-show_entries', 'stream=width,height', '-of', 'json', filePath])
-    const parsed = JSON.parse(output) as {
-      format?: { size?: string; bit_rate?: string }
-      streams?: Array<{ width?: number; height?: number }>
-    }
-    const size = Number.parseInt(parsed?.format?.size || '0', 10) || 0
-    const bitRate = Number.parseInt(parsed?.format?.bit_rate || '0', 10) || 0
-    const stream = parsed.streams?.find(item => (item.width || 0) > 0 && (item.height || 0) > 0)
-    return {
-      size,
-      resolution: stream ? `${stream.width}x${stream.height}` : '',
-      bitrate: bitRate > 0 ? `${(bitRate / 1000000).toFixed(2)} Mbps` : '',
-    }
-  }
-
-  private async resolveExecutable(baseName: 'ffmpeg' | 'ffprobe') {
-    const exeName = process.platform === 'win32' ? `${baseName}.exe` : baseName
-    const candidates = [
-      path.join(this.baseDir, exeName),
-      path.join(path.dirname(process.execPath), exeName),
-    ]
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
-        return candidate
+    if (!fs.existsSync(filePath)) return { size: 0, resolution: '', bitrate: '' }
+    const stat = fs.statSync(filePath)
+    try {
+      const metadata = await parseFile(filePath)
+      const videoTrack = metadata.format.trackInfo.find(t => t.video)?.video
+      const bitRate = metadata.format.bitrate || 0
+      return {
+        size: stat.size,
+        resolution: videoTrack ? `${videoTrack.pixelWidth || videoTrack.displayWidth || 0}x${videoTrack.pixelHeight || videoTrack.displayHeight || 0}` : '',
+        bitrate: bitRate > 0 ? `${(bitRate / 1000000).toFixed(2)} Mbps` : '',
       }
+    } catch {
+      return { size: stat.size, resolution: '', bitrate: '' }
     }
-    return exeName
-  }
-
-  private async execFileCapture(command: string, args: string[]) {
-    return await new Promise<string>((resolve, reject) => {
-      const child = spawn(command, args, { windowsHide: true })
-      let stdout = ''
-      let stderr = ''
-      child.stdout.on('data', chunk => {
-        stdout += chunk.toString()
-      })
-      child.stderr.on('data', chunk => {
-        stderr += chunk.toString()
-      })
-      child.on('error', reject)
-      child.on('close', code => {
-        if (code === 0) {
-          resolve(stdout)
-          return
-        }
-        reject(new Error(stderr.trim() || `${command} exited with code ${code}`))
-      })
-    })
   }
 
   private formatElapsed(totalSeconds: number) {
