@@ -41,6 +41,14 @@ Thumbs.db
 release/
 *.zip
 scratch/
- 
+
+# Electron downloaded binaries
+electron-v*.zip
+
+# Debug artifacts
+.dbg/
+debug-*.md
+
+# Patch / intermediate files
 patch*.js
 reference
