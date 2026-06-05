@@ -69,6 +69,7 @@ interface Config {
     filename_template: string
     max_concurrent_tasks: number
     concurrent_segments: number
+    clip_output_dir: string
   }
 }
 
@@ -1068,7 +1069,7 @@ function App() {
 
   function ClipPage() {
     const [url, setUrl] = useState('')
-    const [videoInfo, setVideoInfo] = useState<{ title: string; duration: number; author: string; cover: string; audioProxyPath: string } | null>(null)
+    const [videoInfo, setVideoInfo] = useState<{ title: string; duration: number; author: string; cover: string; audioProxyPath: string; qualities?: { audio: { id: number; bandwidth: number; codecs: string }[]; video: { id: number; bandwidth: number; codecs: string; width: number; height: number; frameRate: string }[] } } | null>(null)
     const [startTime, setStartTime] = useState(0)
     const [endTime, setEndTime] = useState(30)
     const [clipLoading, setClipLoading] = useState(false)
@@ -1077,15 +1078,33 @@ function App() {
     const [playing, setPlaying] = useState(false)
     const [clipResult, setClipResult] = useState<{ fileName: string; path: string } | null>(null)
     const [audioLoading, setAudioLoading] = useState(false)
+    const [zoomWindow, setZoomWindow] = useState(120)
+    const [scrollOffset, setScrollOffset] = useState(0)
+    const [audioQualityIndex, setAudioQualityIndex] = useState(0)
     const canvasRef = useRef<HTMLCanvasElement>(null)
     const audioCtxRef = useRef<AudioContext | null>(null)
     const sourceRef = useRef<AudioBufferSourceNode | null>(null)
     const dragRef = useRef<'start' | 'end' | null>(null)
 
+    // Create ONE AudioContext at mount time, never close until unmount
+    useEffect(() => {
+      const ctx = new AudioContext()
+      audioCtxRef.current = ctx
+      return () => {
+        ctx.close().catch(() => {})
+      }
+    }, [])
+
     const fmtTime = (s: number) => {
       const m = Math.floor(s / 60)
       const sec = (s % 60).toFixed(1)
       return `${m}:${String(sec).padStart(4, '0')}`
+    }
+
+    const formatBandwidth = (bps: number) => {
+      if (bps >= 1000000) return `${(bps / 1000000).toFixed(1)} Mbps`
+      if (bps >= 1000) return `${(bps / 1000).toFixed(0)} kbps`
+      return `${bps} bps`
     }
 
     const fetchInfo = async () => {
@@ -1094,12 +1113,14 @@ function App() {
       setVideoInfo(null)
       setAudioBuffer(null)
       setClipResult(null)
+      setAudioQualityIndex(0)
       try {
         const res = await apiClient.post('/api/clip/info', { url })
-        const info = res.data as { title: string; duration: number; author: string; cover: string; audioProxyPath: string }
+        const info = res.data as { title: string; duration: number; author: string; cover: string; audioProxyPath: string; qualities?: { audio: { id: number; bandwidth: number; codecs: string }[]; video: { id: number; bandwidth: number; codecs: string; width: number; height: number; frameRate: string }[] } }
         setVideoInfo(info)
         setStartTime(0)
         setEndTime(Math.min(info.duration, 30))
+        setScrollOffset(Math.min(info.duration, 30) / 2)
         if (info.audioProxyPath) {
           loadAudio(info.audioProxyPath)
         }
@@ -1112,11 +1133,14 @@ function App() {
     const loadAudio = async (proxyPath: string) => {
       setAudioLoading(true)
       try {
-        const audioCtx = new AudioContext()
-        audioCtxRef.current = audioCtx
+        const ctx = audioCtxRef.current!
+        // Resume context if suspended (autoplay policy)
+        if (ctx.state === 'suspended') {
+          await ctx.resume()
+        }
         const audioUrl = proxyPath.startsWith('http') ? proxyPath : `${apiBase}${proxyPath}`
         const resp = await apiClient.get(audioUrl, { responseType: 'arraybuffer' })
-        const buffer = await audioCtx.decodeAudioData(resp.data as ArrayBuffer)
+        const buffer = await ctx.decodeAudioData(resp.data as ArrayBuffer)
         setAudioBuffer(buffer)
       } catch (e) {
         showToast({ tone: 'error', title: 'Failed to load audio', message: getErrorMessage(e) })
@@ -1140,14 +1164,26 @@ function App() {
       canvas.style.width = w + 'px'
       canvas.style.height = h + 'px'
 
+      const dur = buffer.duration
+      const viewStart = Math.max(0, Math.min(dur - zoomWindow, scrollOffset - zoomWindow / 2))
+      const viewEnd = Math.min(dur, viewStart + zoomWindow)
+      const viewDur = viewEnd - viewStart
+
       const data = buffer.getChannelData(0)
-      const step = Math.ceil(data.length / w)
+      const sampleRate = buffer.sampleRate
+      const startSample = Math.floor(viewStart * sampleRate)
+      const endSample = Math.min(data.length, Math.ceil(viewEnd * sampleRate))
+      const viewSamples = endSample - startSample
+
+      if (viewSamples <= 0) return
+
+      const step = Math.ceil(viewSamples / w)
       const peaks: number[] = []
       for (let i = 0; i < w; i++) {
         let max = 0
-        const start = i * step
-        const end = Math.min(start + step, data.length)
-        for (let j = start; j < end; j++) {
+        const s = startSample + i * step
+        const e = Math.min(startSample + (i + 1) * step, data.length)
+        for (let j = s; j < e; j++) {
           const v = Math.abs(data[j])
           if (v > max) max = v
         }
@@ -1157,9 +1193,9 @@ function App() {
       ctx.clearRect(0, 0, w, h)
 
       const mid = h / 2
-      const dur = buffer.duration
-      const startX = (startTime / dur) * w
-      const endX = (endTime / dur) * w
+      const pixelsPerSecond = w / viewDur
+      const startX = (startTime - viewStart) * pixelsPerSecond
+      const endX = (endTime - viewStart) * pixelsPerSecond
 
       // Draw waveform bars
       for (let i = 0; i < peaks.length; i++) {
@@ -1174,8 +1210,10 @@ function App() {
       }
 
       // Draw selection overlay
-      ctx.fillStyle = 'rgba(0,161,214,0.08)'
-      ctx.fillRect(startX, 0, endX - startX, h)
+      if (endX > startX) {
+        ctx.fillStyle = 'rgba(0,161,214,0.08)'
+        ctx.fillRect(startX, 0, endX - startX, h)
+      }
 
       // Draw handles
       const drawHandle = (x: number, label: string) => {
@@ -1185,7 +1223,6 @@ function App() {
         ctx.moveTo(x, 0)
         ctx.lineTo(x, h)
         ctx.stroke()
-        // handle top knob
         ctx.fillStyle = 'rgba(0,161,214,1)'
         ctx.beginPath()
         ctx.arc(x, 0, 6, 0, Math.PI * 2)
@@ -1196,9 +1233,9 @@ function App() {
         ctx.fillText(label, Math.max(15, Math.min(w - 15, x)), 16)
       }
 
-      drawHandle(startX, fmtTime(startTime))
-      drawHandle(endX, fmtTime(endTime))
-    }, [audioBuffer, startTime, endTime, fmtTime])
+      if (startX >= 0 && startX <= w) drawHandle(startX, fmtTime(startTime))
+      if (endX >= 0 && endX <= w) drawHandle(endX, fmtTime(endTime))
+    }, [audioBuffer, startTime, endTime, zoomWindow, scrollOffset, fmtTime])
 
     useEffect(() => {
       if (audioBuffer && videoInfo) drawWaveform()
@@ -1215,9 +1252,6 @@ function App() {
         if (sourceRef.current) {
           try { sourceRef.current.stop() } catch {}
         }
-        if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
-          audioCtxRef.current.close().catch(() => {})
-        }
       }
     }, [])
 
@@ -1227,9 +1261,11 @@ function App() {
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()
       const x = e.clientX - rect.left
-      const dur = audioBuffer.duration
-      const startX = (startTime / dur) * rect.width
-      const endX = (endTime / dur) * rect.width
+      const viewStart = Math.max(0, Math.min(audioBuffer.duration - zoomWindow, scrollOffset - zoomWindow / 2))
+      const viewDur = Math.min(audioBuffer.duration - viewStart, zoomWindow)
+      const pixelsPerSecond = rect.width / viewDur
+      const startX = (startTime - viewStart) * pixelsPerSecond
+      const endX = (endTime - viewStart) * pixelsPerSecond
       const threshold = 10
       if (Math.abs(x - startX) < threshold) {
         dragRef.current = 'start'
@@ -1244,7 +1280,9 @@ function App() {
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()
       const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
-      const t = (x / rect.width) * audioBuffer.duration
+      const viewStart = Math.max(0, Math.min(audioBuffer.duration - zoomWindow, scrollOffset - zoomWindow / 2))
+      const viewDur = Math.min(audioBuffer.duration - viewStart, zoomWindow)
+      const t = viewStart + (x / rect.width) * viewDur
       if (dragRef.current === 'start') {
         setStartTime(Math.max(0, Math.min(endTime - 0.5, t)))
       } else {
@@ -1256,11 +1294,29 @@ function App() {
       dragRef.current = null
     }
 
+    const handleCanvasWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+      if (!audioBuffer) return
+      e.preventDefault()
+      const shift = (e.deltaY / 100) * (zoomWindow / 4)
+      setScrollOffset(prev => Math.max(zoomWindow / 2, Math.min(audioBuffer.duration - zoomWindow / 2, prev + shift * 10)))
+    }
+
+    const doZoomIn = () => setZoomWindow(prev => Math.max(10, prev / 2))
+    const doZoomOut = () => setZoomWindow(prev => Math.min(audioBuffer?.duration || 3600, prev * 2))
+    const doScrollLeft = () => setScrollOffset(prev => Math.max(zoomWindow / 2, prev - zoomWindow / 4))
+    const doScrollRight = () => {
+      if (!audioBuffer) return
+      setScrollOffset(prev => Math.min(audioBuffer.duration - zoomWindow / 2, prev + zoomWindow / 4))
+    }
+
     const playPreview = () => {
       if (!audioBuffer) return
       const ctx = audioCtxRef.current
-      if (!ctx || ctx.state === 'closed') return
-      if (ctx.state === 'suspended') ctx.resume()
+      if (!ctx) return
+      if (ctx.state === 'closed') return
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {})
+      }
       if (sourceRef.current) {
         try { sourceRef.current.stop() } catch {}
       }
@@ -1288,7 +1344,7 @@ function App() {
       setClipLoading(true)
       setClipError('')
       try {
-        const res = await apiClient.post('/api/clip/execute', { url, startTime, endTime })
+        const res = await apiClient.post('/api/clip/execute', { url, startTime, endTime, qualityIndex: audioQualityIndex })
         setClipResult(res.data as { fileName: string; path: string })
         showToast({ tone: 'success', title: 'Clip completed', message: (res.data as { fileName: string }).fileName })
       } catch (e) {
@@ -1344,6 +1400,42 @@ function App() {
                 <div className="text-sm text-slate-500 mt-0.5">{t('common.duration')}: {fmtTime(videoInfo.duration)}</div>
               </div>
             </div>
+
+            {/* Quality Selectors */}
+            {videoInfo.qualities && (
+              <div className="flex flex-wrap gap-4">
+                {videoInfo.qualities.audio.length > 1 && (
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-medium text-slate-600">Audio Quality:</label>
+                    <select
+                      value={audioQualityIndex}
+                      onChange={e => setAudioQualityIndex(Number(e.target.value))}
+                      className="px-2 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none"
+                    >
+                      {videoInfo.qualities.audio.map((a, i) => (
+                        <option key={a.id} value={i}>
+                          {formatBandwidth(a.bandwidth)} {a.codecs ? `(${a.codecs})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {videoInfo.qualities.video.length > 1 && (
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-medium text-slate-600">Video Quality:</label>
+                    <select
+                      className="px-2 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none"
+                    >
+                      {videoInfo.qualities.video.map((v, i) => (
+                        <option key={v.id} value={i}>
+                          {v.width}x{v.height} {formatBandwidth(v.bandwidth)} {v.codecs ? `(${v.codecs})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Time Range Inputs */}
             <div className="flex flex-wrap items-center gap-4">
@@ -1403,7 +1495,16 @@ function App() {
         {/* Waveform */}
         {(audioBuffer || audioLoading) && (
           <div className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm space-y-4">
-            <div className="text-sm font-semibold text-slate-700">Audio Waveform</div>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="text-sm font-semibold text-slate-700">Audio Waveform</div>
+              <div className="flex items-center gap-1">
+                <button onClick={doZoomIn} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Zoom In">Zoom In</button>
+                <button onClick={doZoomOut} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Zoom Out">Zoom Out</button>
+                <button onClick={doScrollLeft} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Scroll Left">←</button>
+                <button onClick={doScrollRight} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Scroll Right">→</button>
+                <span className="text-xs text-slate-400 ml-1">{fmtTime(zoomWindow)} window</span>
+              </div>
+            </div>
             {audioLoading ? (
               <div className="flex items-center justify-center h-32 text-slate-400">
                 <Loader2 className="w-5 h-5 animate-spin mr-2" />
@@ -1417,6 +1518,7 @@ function App() {
                 onMouseMove={handleCanvasMouseMove}
                 onMouseUp={handleCanvasMouseUp}
                 onMouseLeave={handleCanvasMouseUp}
+                onWheel={handleCanvasWheel}
               />
             ) : null}
 
@@ -2003,6 +2105,16 @@ function App() {
                           </button>
                         </div>
                         <div className="text-xs text-slate-500 mt-1">{t('settings.outputTip')}</div>
+                      </div>
+
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Clip Output Dir</label>
+                        <input
+                          value={config.download.clip_output_dir || ''}
+                          onChange={e => setConfig({ ...config, download: { ...config.download, clip_output_dir: e.target.value } })}
+                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-bili-pink)] focus:border-transparent outline-none transition"
+                        />
+                        <div className="text-xs text-slate-500 mt-1">Output directory for clipped audio files</div>
                       </div>
 
                       <div className="md:col-span-2">

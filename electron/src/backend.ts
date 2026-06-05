@@ -23,6 +23,7 @@ type AppConfig = {
     filename_template: string
     max_concurrent_tasks: number
     concurrent_segments: number
+    clip_output_dir: string
   }
   database: {
     dsn: string
@@ -127,6 +128,7 @@ const DEFAULT_CONFIG: AppConfig = {
     filename_template: '{yy}-{MM}-{dd} {start:150405} {title}.mp4',
     max_concurrent_tasks: 2,
     concurrent_segments: 5,
+    clip_output_dir: 'clips',
   },
   database: {
     dsn: 'replays.db',
@@ -799,8 +801,8 @@ class DesktopBackend {
 
     this.app.post('/api/clip/execute', async (req, res) => {
       try {
-        const { url, startTime, endTime } = req.body
-        const result = await this.executeClip(url, Number(startTime) || 0, Number(endTime) || 0)
+        const { url, startTime, endTime, qualityIndex } = req.body
+        const result = await this.executeClip(url, Number(startTime) || 0, Number(endTime) || 0, Number(qualityIndex) || 0)
         res.json(result)
       } catch (error) {
         this.sendError(res, error)
@@ -873,6 +875,7 @@ class DesktopBackend {
     normalized.download.filename_template ||= DEFAULT_CONFIG.download.filename_template
     normalized.download.max_concurrent_tasks ||= DEFAULT_CONFIG.download.max_concurrent_tasks
     normalized.download.concurrent_segments ||= DEFAULT_CONFIG.download.concurrent_segments
+    normalized.download.clip_output_dir ||= DEFAULT_CONFIG.download.clip_output_dir
     normalized.bilibili.anchor_id ||= 0
     normalized.server.port ||= DEFAULT_CONFIG.server.port
     normalized.bilibili.cookies ||= {}
@@ -884,6 +887,7 @@ class DesktopBackend {
     clone.bilibili.cookie_file = this.relativizeAppPath(clone.bilibili.cookie_file)
     clone.download.output_dir = this.relativizeAppPath(clone.download.output_dir)
     clone.download.temp_dir = this.relativizeAppPath(clone.download.temp_dir)
+    clone.download.clip_output_dir = this.relativizeAppPath(clone.download.clip_output_dir)
     clone.database.dsn = this.relativizeAppPath(clone.database.dsn)
     await fsp.writeFile(this.configPath, YAML.stringify(clone), 'utf8')
   }
@@ -2091,33 +2095,54 @@ class DesktopBackend {
     if (info.code !== 0) throw new Error(info.message || '获取视频信息失败')
     const { title, duration, cid, owner, pic } = info.data
 
-    // Get audio stream URL
-    const playUrl = await this.fetchJSON<{ code: number; data: { dash?: { audio: Array<{ base_url: string; bandwidth: number; codecs: string }> } } }>(
+    // Get audio and video stream URLs
+    const playUrl = await this.fetchJSON<{ code: number; data: { dash?: { audio: Array<{ id: number; base_url: string; bandwidth: number; codecs: string }>; video: Array<{ id: number; base_url: string; bandwidth: number; codecs: string; width: number; height: number; frame_rate: string }> } } }>(
       `https://api.bilibili.com/x/player/playurl?${queryParam}&cid=${cid}&fnval=4048`,
     )
     const audioList = playUrl?.data?.dash?.audio || []
+    const videoList = playUrl?.data?.dash?.video || []
     if (audioList.length === 0) throw new Error('无法获取音频流')
     // Pick highest quality audio
     audioList.sort((a, b) => b.bandwidth - a.bandwidth)
     const audioUrl = audioList[0].base_url
 
-    return { title, duration, cid, author: owner.name, cover: pic, audioUrl, audioCodec: audioList[0].codecs || 'aac' }
+    return {
+      title, duration, cid, author: owner.name, cover: pic,
+      audioUrl, audioCodec: audioList[0].codecs || 'aac',
+      qualities: {
+        audio: audioList.map(a => ({ id: a.id, bandwidth: a.bandwidth, codecs: a.codecs })),
+        video: videoList.map(v => ({ id: v.id, bandwidth: v.bandwidth, codecs: v.codecs, width: v.width, height: v.height, frameRate: v.frame_rate })),
+      },
+    }
   }
 
-  private async executeClip(rawUrl: string, startTime: number, endTime: number) {
+  private async executeClip(rawUrl: string, startTime: number, endTime: number, qualityIndex: number = 0) {
     if (startTime < 0) startTime = 0
     if (endTime <= startTime) throw new Error('结束时间必须大于开始时间')
     const info = await this.getBilibiliVideoInfo(rawUrl)
     if (endTime > info.duration) endTime = info.duration
 
-    const clipDir = path.join(this.config.download.output_dir, 'clips')
+    // Select audio URL by qualityIndex
+    let audioUrl = info.audioUrl
+    if (qualityIndex > 0 && qualityIndex < info.qualities.audio.length) {
+      const parsed = this.parseBilibiliUrl(rawUrl)
+      const queryParam = parsed!.type === 'bv' ? `bvid=${parsed!.id}` : `aid=${parsed!.id}`
+      const playUrl = await this.fetchJSON<{ code: number; data: { dash?: { audio: Array<{ base_url: string }> } } }>(
+        `https://api.bilibili.com/x/player/playurl?${queryParam}&cid=${info.cid}&fnval=4048`,
+      )
+      if (playUrl?.data?.dash?.audio && playUrl.data.dash.audio[qualityIndex]) {
+        audioUrl = playUrl.data.dash.audio[qualityIndex].base_url
+      }
+    }
+
+    const clipDir = this.resolveAppPath(this.config.download.clip_output_dir || path.join(this.config.download.output_dir, 'clips'))
     this.ensureDir(clipDir)
     const safeTitle = sanitizeFilename(info.title || 'clip')
     const ts = `${formatSeconds(startTime)}-${formatSeconds(endTime)}`
     const outPath = uniquePath(path.join(clipDir, `[cut] ${safeTitle} (${ts}).m4a`))
 
     // Download the full audio
-    const response = await this.fetchWithCookies(info.audioUrl)
+    const response = await this.fetchWithCookies(audioUrl)
     if (!response.ok) throw new Error(`音频下载失败: ${response.status}`)
     const buffer = Buffer.from(await response.arrayBuffer())
 
