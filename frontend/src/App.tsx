@@ -1,7 +1,7 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
-import axios from 'axios'
+import axios, { type AxiosInstance } from 'axios'
 import { QRCodeSVG } from 'qrcode.react'
 import {
   Download,
@@ -46,6 +46,7 @@ interface Replay {
   eta: string
   verify_ok: boolean
   actual_duration: number
+  cover_src?: string
   streams?: StreamSlice[]
 }
 
@@ -92,6 +93,10 @@ interface Runtime {
   paused: boolean
   max_concurrent_tasks: number
   concurrent_segments: number
+  downloading_tasks: number
+  queued_tasks: number
+  paused_tasks: number
+  failed_tasks: number
 }
 
 interface ScanSummary {
@@ -141,6 +146,18 @@ function statusColor(status: string) {
   if (status === 'paused') return 'bg-amber-500'
   if (status === 'downloading' || status === 'merging') return 'bg-[var(--color-bili-blue)]'
   return 'bg-slate-400'
+}
+
+const ACTIVE_STATUSES = ['pending', 'downloading', 'merging', 'paused'] as const
+const TERMINAL_STATUSES = ['completed', 'failed', 'deleted', 'not_downloaded'] as const
+
+function shouldUseRealtimeProgress(progress: Progress | undefined, replay: Replay) {
+  if (!progress) return false
+  if (TERMINAL_STATUSES.includes(replay.status as typeof TERMINAL_STATUSES[number]) &&
+      ACTIVE_STATUSES.includes(progress.status as typeof ACTIVE_STATUSES[number])) {
+    return false
+  }
+  return true
 }
 
 function StatusPill({ label, tone }: { label: string; tone: 'good' | 'bad' | 'neutral' }) {
@@ -228,7 +245,7 @@ type ToastTone = 'loading' | 'success' | 'error' | 'info'
 type Toast = { id: number; tone: ToastTone; title: string; message?: string }
 
 
-function LoginModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: () => void }) {
+function LoginModal({ apiClient, onClose, onSuccess }: { apiClient: AxiosInstance; onClose: () => void; onSuccess: () => void }) {
   const { t } = useTranslation()
   const [url, setUrl] = useState('')
   const [key, setKey] = useState('')
@@ -237,7 +254,7 @@ function LoginModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: ()
 
   const fetchQR = useCallback(async () => {
     try {
-      const res = await axios.get('/api/login/qr')
+      const res = await apiClient.get('/api/login/qr')
       setUrl(res.data.url)
       setKey(res.data.qrcode_key)
       setStatusText(t('common.loginScanWait'))
@@ -245,7 +262,7 @@ function LoginModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: ()
     } catch (err: any) {
       setErrorText(t('common.loginFailed') + ' ' + getErrorMessage(err))
     }
-  }, [t])
+  }, [apiClient, t])
 
   useEffect(() => {
     fetchQR()
@@ -255,7 +272,7 @@ function LoginModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: ()
     if (!key) return
     const interval = setInterval(async () => {
       try {
-        const res = await axios.get(`/api/login/poll?qrcode_key=${key}`)
+        const res = await apiClient.get(`/api/login/poll?qrcode_key=${key}`)
         const code = res.data.code
         if (code === 0) {
           setStatusText(t('common.loginSuccess'))
@@ -270,7 +287,7 @@ function LoginModal({ onClose, onSuccess }: { onClose: () => void; onSuccess: ()
       } catch (err: any) {}
     }, 2000)
     return () => clearInterval(interval)
-  }, [key, onSuccess, t])
+  }, [apiClient, key, onSuccess, t])
 
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm sm:p-6">
@@ -316,19 +333,32 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [exportUseProxy, setExportUseProxy] = useState(false)
+  const [apiBase, setApiBase] = useState('')
 
+  const apiClient = useMemo(() => axios.create({
+    baseURL: apiBase || undefined,
+  }), [apiBase])
 
+  const buildApiUrl = useCallback((path: string) => {
+    if (!apiBase) return path
+    return `${apiBase}${path}`
+  }, [apiBase])
 
-
+  const buildWsUrl = useCallback((path: string) => {
+    if (!apiBase) return ''
+    return `${apiBase.replace(/^http/i, 'ws')}${path}`
+  }, [apiBase])
 
   const [replays, setReplays] = useState<Replay[]>([])
   const [config, setConfig] = useState<Config | null>(null)
   const loadedConfigRef = useRef<Config | null>(null)
   const [me, setMe] = useState<Me | null>(null)
   const [backendOnline, setBackendOnline] = useState(false)
+  const [wsOnline, setWsOnline] = useState(false)
   const [paused, setPaused] = useState(false)
+  const [runtimeState, setRuntimeState] = useState<Runtime | null>(null)
   const [progressMap, setProgressMap] = useState<Record<string, Progress>>({})
-  const [selectedReplay, setSelectedReplay] = useState<Replay | null>(null)
+  const [selectedLiveKey, setSelectedLiveKey] = useState<string | null>(null)
   const [m3u8Open, setM3u8Open] = useState(false)
   const [isScanning, setIsScanning] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
@@ -366,8 +396,34 @@ function App() {
   const diskStatsErrorShown = useRef(false)
 
   useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      let resolved = ''
+      try {
+        resolved = (await window.desktopAPI?.getBackendBaseURL?.()) || ''
+      } catch {
+        resolved = ''
+      }
+      if (!resolved && /^https?:$/i.test(window.location.protocol)) {
+        resolved = window.location.origin
+      }
+      if (!cancelled) {
+        setApiBase(resolved.replace(/\/$/, ''))
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     setM3u8Open(false)
-  }, [selectedReplay?.live_key])
+  }, [selectedLiveKey])
+
+  const selectedReplay = useMemo(
+    () => replays.find(r => r.live_key === selectedLiveKey) || null,
+    [replays, selectedLiveKey],
+  )
 
   const dismissToast = useCallback((id: number) => {
     setToasts(prev => prev.filter(t => t.id !== id))
@@ -389,13 +445,31 @@ function App() {
 
   const showToast = useCallback((t: Omit<Toast, 'id'> & { durationMs?: number }) => {
     const id = toastSeq.current++
-    setToasts(prev => [...prev, { id, tone: t.tone, title: t.title, message: t.message }].slice(-4))
+    setToasts(prev => {
+      const next = [...prev, { id, tone: t.tone, title: t.title, message: t.message }]
+      const removed = next.slice(0, Math.max(0, next.length - 4))
+      for (const toast of removed) {
+        const timer = toastTimers.current[toast.id]
+        if (timer) {
+          window.clearTimeout(timer)
+          delete toastTimers.current[toast.id]
+        }
+      }
+      return next.slice(-4)
+    })
     upsertToastTimer(id, t.tone, t.durationMs)
     return id
   }, [upsertToastTimer])
 
   const replaceToast = useCallback((id: number, t: Omit<Toast, 'id'> & { durationMs?: number }) => {
-    setToasts(prev => prev.map(x => (x.id === id ? { id, tone: t.tone, title: t.title, message: t.message } : x)))
+    let found = false
+    setToasts(prev => {
+      found = prev.some(x => x.id === id)
+      if (!found) {
+        return [...prev, { id, tone: t.tone, title: t.title, message: t.message }].slice(-4)
+      }
+      return prev.map(x => (x.id === id ? { id, tone: t.tone, title: t.title, message: t.message } : x))
+    })
     upsertToastTimer(id, t.tone, t.durationMs)
   }, [upsertToastTimer])
 
@@ -426,7 +500,30 @@ function App() {
     [progressMap],
   )
 
+  const hasActiveReplay = useMemo(
+    () =>
+      replays.some(r => ACTIVE_STATUSES.includes(r.status as typeof ACTIVE_STATUSES[number])) ||
+      Object.values(progressMap).some(p => ACTIVE_STATUSES.includes(p.status as typeof ACTIVE_STATUSES[number])),
+    [progressMap, replays],
+  )
+
+  const runtimeSnapshot = useMemo(() => {
+    const fallbackDownloading = replays.filter(r => r.status === 'downloading' || r.status === 'merging').length
+    const fallbackQueued = replays.filter(r => r.status === 'pending').length
+    const fallbackPaused = replays.filter(r => r.status === 'paused').length
+    const fallbackFailed = replays.filter(r => r.status === 'failed').length
+    return {
+      maxConcurrentTasks: runtimeState?.max_concurrent_tasks ?? config?.download?.max_concurrent_tasks ?? 0,
+      concurrentSegments: runtimeState?.concurrent_segments ?? config?.download?.concurrent_segments ?? 0,
+      downloadingTasks: runtimeState?.downloading_tasks ?? fallbackDownloading,
+      queuedTasks: runtimeState?.queued_tasks ?? fallbackQueued,
+      pausedTasks: runtimeState?.paused_tasks ?? fallbackPaused,
+      failedTasks: runtimeState?.failed_tasks ?? fallbackFailed,
+    }
+  }, [config?.download?.concurrent_segments, config?.download?.max_concurrent_tasks, replays, runtimeState])
+
   useEffect(() => {
+    if (!apiBase) return
     fetchReplays()
     fetchConfig()
     fetchMe()
@@ -434,10 +531,10 @@ function App() {
     pingHealth()
     const healthTimer = setInterval(pingHealth, 30000)
 
-    const ws = new WebSocket(`ws://${window.location.host}/ws`)
-    ws.onopen = () => setBackendOnline(true)
-    ws.onerror = () => setBackendOnline(false)
-    ws.onclose = () => setBackendOnline(false)
+    const ws = new WebSocket(buildWsUrl('/ws'))
+    ws.onopen = () => setWsOnline(true)
+    ws.onerror = () => setWsOnline(false)
+    ws.onclose = () => setWsOnline(false)
     ws.onmessage = (event) => {
       const data: Progress = JSON.parse(event.data)
       setProgressMap(prev => {
@@ -464,20 +561,36 @@ function App() {
         }
         return { ...prev, [data.live_key]: next }
       })
+      setReplays(prev =>
+        prev.map(item =>
+          item.live_key === data.live_key
+            ? {
+                ...item,
+                status: data.status === 'merging' ? 'downloading' : data.status,
+                message: data.message || item.message,
+                progress: data.status === 'completed' ? 100 : (data.progress ?? item.progress),
+                speed: data.speed || item.speed,
+                elapsed: data.elapsed || item.elapsed,
+                eta: data.eta || item.eta,
+              }
+            : item,
+        ),
+      )
       if (data.status === 'completed' || data.status === 'failed') fetchReplays()
     }
     return () => {
       clearInterval(healthTimer)
+      setWsOnline(false)
       ws.close()
     }
-  }, [])
+  }, [apiBase, buildWsUrl])
 
   const fetchDiskStats = useCallback(async () => {
-    if (!backendOnline) return
+    if (!apiBase || !backendOnline) return
     if (!config?.download?.output_dir) return
     setDiskStatsLoading(true)
     try {
-      const res = await axios.get('/api/stats/disk')
+      const res = await apiClient.get('/api/stats/disk')
       setDiskStats(res.data as DiskStats)
       diskStatsErrorShown.current = false
     } catch (e) {
@@ -494,7 +607,7 @@ function App() {
     } finally {
       setDiskStatsLoading(false)
     }
-  }, [backendOnline, config?.download?.output_dir, getErrorMessage, lang, showToast])
+  }, [apiBase, apiClient, backendOnline, config?.download?.output_dir, getErrorMessage, lang, showToast])
 
   useEffect(() => {
     fetchDiskStats()
@@ -511,8 +624,9 @@ function App() {
   }, [])
 
   const pingHealth = async () => {
+    if (!apiBase) return
     try {
-      await axios.get('/api/health', { timeout: 2000 })
+      await apiClient.get('/api/health', { timeout: 2000 })
       setBackendOnline(true)
     } catch {
       setBackendOnline(false)
@@ -524,9 +638,24 @@ function App() {
     const toastId = notify ? showToast({ tone: 'loading', title: t('messages.refreshing') }) : null
     if (notify) setIsRefreshing(true)
     try {
-      const res = await axios.get('/api/replays')
+      const res = await apiClient.get('/api/replays')
       const list = (res.data || []) as Replay[]
       setReplays(list)
+      setProgressMap(prev => {
+        const liveKeys = new Set(list.map(replay => replay.live_key))
+        const next = { ...prev }
+        for (const liveKey of Object.keys(next)) {
+          if (!liveKeys.has(liveKey)) {
+            delete next[liveKey]
+          }
+        }
+        for (const replay of list) {
+          if (!shouldUseRealtimeProgress(next[replay.live_key], replay)) {
+            delete next[replay.live_key]
+          }
+        }
+        return next
+      })
       setBackendOnline(true)
       if (toastId) {
         const counts: Record<string, number> = {}
@@ -549,9 +678,17 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    if (!apiBase || !backendOnline || !hasActiveReplay) return
+    const timer = window.setInterval(() => {
+      fetchReplays({ notify: false })
+    }, 5000)
+    return () => window.clearInterval(timer)
+  }, [apiBase, backendOnline, hasActiveReplay])
+
   const fetchConfig = async () => {
     try {
-      const res = await axios.get('/api/config')
+      const res = await apiClient.get('/api/config')
       setConfig(res.data)
       loadedConfigRef.current = res.data
       setBackendOnline(true)
@@ -562,7 +699,7 @@ function App() {
 
   const fetchMe = async () => {
     try {
-      const res = await axios.get('/api/me')
+      const res = await apiClient.get('/api/me')
       setMe(res.data)
       setBackendOnline(true)
     } catch (e) {
@@ -570,22 +707,30 @@ function App() {
     }
   }
 
-  const fetchRuntime = async () => {
+  const fetchRuntime = useCallback(async () => {
     try {
-      const res = await axios.get('/api/runtime')
+      const res = await apiClient.get('/api/runtime')
       const rt = res.data as Runtime
       setPaused(!!rt.paused)
+      setRuntimeState(rt)
       setBackendOnline(true)
     } catch (e) {
       setBackendOnline(false)
     }
-  }
+  }, [apiClient])
+
+  useEffect(() => {
+    if (!apiBase) return
+    const intervalMs = hasActiveReplay ? 5000 : 30000
+    const timer = window.setInterval(fetchRuntime, intervalMs)
+    return () => window.clearInterval(timer)
+  }, [apiBase, fetchRuntime, hasActiveReplay])
 
   const handleScan = async () => {
     setIsScanning(true)
     const toastId = showToast({ tone: 'loading', title: t('messages.scanStarting') })
     try {
-      const res = await axios.post('/api/scan')
+      const res = await apiClient.post('/api/scan')
       setBackendOnline(true)
       const raw = (res.data || {}) as any
       const s: ScanSummary = {
@@ -610,7 +755,7 @@ function App() {
 
   const handleCopyExport = async () => {
     try {
-      const res = await axios.get(`/api/export-tsv?proxy=${exportUseProxy}`)
+      const res = await apiClient.get(`/api/export-tsv?proxy=${exportUseProxy}`)
       await navigator.clipboard.writeText(res.data)
       showToast({ tone: 'success', title: t('messages.copyExportOk') })
     } catch (e) {
@@ -627,7 +772,7 @@ function App() {
         successTitle: t('messages.started'),
         successMessage: t('messages.tasksRunning'),
         errorTitle: t('messages.startFailed'),
-        action: () => axios.post('/api/sync-all'),
+        action: () => apiClient.post('/api/sync-all'),
       })
     } finally {
       setIsSyncingAll(false)
@@ -641,7 +786,7 @@ function App() {
       message: t('messages.cleaningStale'),
     })
     try {
-      const res = await axios.post('/api/cleanup-stale')
+      const res = await apiClient.post('/api/cleanup-stale')
       setBackendOnline(true)
       const count = res.data?.count ?? 0
       replaceToast(toastId, {
@@ -663,7 +808,7 @@ function App() {
       message: t('messages.cleaningStreams'),
     })
     try {
-      const res = await axios.post('/api/cleanup-streams')
+      const res = await apiClient.post('/api/cleanup-streams')
       setBackendOnline(true)
       const count = res.data?.count ?? 0
       replaceToast(toastId, {
@@ -685,7 +830,7 @@ function App() {
       successTitle: t('messages.paused'),
       errorTitle: t('messages.pauseFailed'),
       action: async () => {
-        const res = await axios.post('/api/pause-all')
+        const res = await apiClient.post('/api/pause-all')
         setBackendOnline(true)
         setPaused(true)
         await fetchReplays({ notify: false })
@@ -701,7 +846,7 @@ function App() {
       successTitle: t('messages.resumed'),
       errorTitle: t('messages.resumeFailed'),
       action: async () => {
-        const res = await axios.post('/api/resume-all')
+        const res = await apiClient.post('/api/resume-all')
         setBackendOnline(true)
         setPaused(false)
         await fetchRuntime()
@@ -717,7 +862,7 @@ function App() {
       successTitle: t('messages.resumed'),
       errorTitle: t('messages.resumeFailed'),
       action: async () => {
-        const res = await axios.post('/api/retry-failed')
+        const res = await apiClient.post('/api/retry-failed')
         setBackendOnline(true)
         setPaused(false)
         await fetchRuntime()
@@ -734,7 +879,7 @@ function App() {
       successTitle: t('messages.resumed'),
       errorTitle: t('messages.resumeFailed'),
       action: async () => {
-        const res = await axios.post('/api/download-unfinished')
+        const res = await apiClient.post('/api/download-unfinished')
         setBackendOnline(true)
         await fetchRuntime()
         await fetchReplays({ notify: false })
@@ -750,7 +895,7 @@ function App() {
       successTitle: t('messages.started'),
       successMessage: t('messages.watchProgress'),
       errorTitle: t('messages.startFailed'),
-      action: () => axios.post(`/api/replays/${liveKey}/download`),
+      action: () => apiClient.post(`/api/replays/${liveKey}/download`),
     })
   }
 
@@ -760,7 +905,7 @@ function App() {
       successTitle: t('messages.paused'),
       errorTitle: t('messages.pauseFailed'),
       action: async () => {
-        const res = await axios.post(`/api/replays/${liveKey}/pause`)
+        const res = await apiClient.post(`/api/replays/${liveKey}/pause`)
         setBackendOnline(true)
         await fetchReplays({ notify: false })
         return res
@@ -774,7 +919,7 @@ function App() {
       successTitle: t('messages.resumed'),
       errorTitle: t('messages.resumeFailed'),
       action: async () => {
-        const res = await axios.post(`/api/replays/${liveKey}/resume`)
+        const res = await apiClient.post(`/api/replays/${liveKey}/resume`)
         setBackendOnline(true)
         await fetchReplays({ notify: false })
         return res
@@ -793,10 +938,10 @@ function App() {
       successTitle: t('messages.deleted'),
       successMessage: t('messages.localDeleted'),
       errorTitle: t('messages.deleteFailed'),
-      action: () => axios.post(`/api/replays/${r.live_key}/delete-file`),
+      action: () => apiClient.post(`/api/replays/${r.live_key}/delete-file`),
     })
     const updated = res.data as Replay
-    setSelectedReplay(prev => (prev?.live_key === updated.live_key ? updated : prev))
+    setSelectedLiveKey(updated.live_key)
     await fetchReplays({ notify: false })
   }
 
@@ -807,10 +952,10 @@ function App() {
       successTitle: t('messages.cached'),
       successMessage: t('messages.savedM3u8'),
       errorTitle: t('messages.cacheFailed'),
-      action: () => axios.post(`/api/replays/${r.live_key}/cache-m3u8`),
+      action: () => apiClient.post(`/api/replays/${r.live_key}/cache-m3u8`),
     })
     const updated = res.data as Replay
-    setSelectedReplay(prev => (prev?.live_key === updated.live_key ? updated : prev))
+    setSelectedLiveKey(updated.live_key)
     await fetchReplays({ notify: false })
   }
 
@@ -826,7 +971,7 @@ function App() {
     if (!localCover) return null
     // Remove any leading 'covers/' if it exists to avoid double /covers/
     const filename = localCover.replace(/^covers[/\\]/, '')
-    return `/covers/${filename}`
+    return buildApiUrl(`/covers/${filename}`)
   }
 
   const openDirModal = async () => {
@@ -837,7 +982,7 @@ function App() {
   const loadDirList = async (path: string) => {
     setDirLoading(true)
     try {
-      const res = await axios.get('/api/fs/list', { params: { path } })
+      const res = await apiClient.get('/api/fs/list', { params: { path } })
       const data = res.data as FsListResponse
       setDirCurrent(data.current || '')
       setDirParent(data.parent || '')
@@ -868,7 +1013,7 @@ function App() {
       const prevTpl = loadedConfigRef.current?.download?.filename_template || ''
       const tplChanged = prevTpl && prevTpl !== config.download.filename_template
       const renameExisting = tplChanged ? window.confirm(t('messages.renamePrompt')) : false
-      const res = await axios.post('/api/config', config, { params: { rename_existing: renameExisting ? 1 : 0 } })
+      const res = await apiClient.post('/api/config', config, { params: { rename_existing: renameExisting ? 1 : 0 } })
       const migrated = parseInt(res.headers?.['x-migrated-files'] || '0')
       const renamed = parseInt(res.headers?.['x-renamed-files'] || '0')
       setConfig(res.data)
@@ -894,15 +1039,34 @@ function App() {
     }
   }
 
+  const handleQuitApp = async () => {
+    try {
+      if (window.desktopAPI?.quitApp) {
+        await window.desktopAPI.quitApp()
+        return
+      }
+    } catch (e) {
+      showToast({ tone: 'error', title: '退出失败', message: getErrorMessage(e) })
+    }
+  }
+
   const runtimePills = useMemo(() => {
     const pills: JSX.Element[] = []
     pills.push(<StatusPill key="backend" label={backendOnline ? t('dashboard.backendOnline') : t('dashboard.backendOffline')} tone={backendOnline ? 'good' : 'bad'} />)
+    pills.push(<StatusPill key="ws" label={wsOnline ? 'WS Live' : 'WS Polling'} tone={wsOnline ? 'good' : 'neutral'} />)
     if (paused) pills.push(<StatusPill key="paused" label={t('common.paused')} tone="neutral" />)
     return pills
-  }, [backendOnline, paused, t])
+  }, [backendOnline, paused, t, wsOnline])
+
+  const runtimeCards = [
+    { label: t('dashboard.concurrencyLimit'), value: runtimeSnapshot.maxConcurrentTasks, tone: 'text-[var(--color-bili-blue)]' },
+    { label: t('dashboard.downloadingTasks'), value: runtimeSnapshot.downloadingTasks, tone: 'text-green-600' },
+    { label: t('dashboard.queuedTasks'), value: runtimeSnapshot.queuedTasks, tone: 'text-amber-600' },
+    { label: t('dashboard.pausedTasks'), value: runtimeSnapshot.pausedTasks, tone: 'text-slate-600' },
+  ]
 
   return (
-    <div className="min-h-screen bg-neutral-100 text-slate-800">
+    <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_right,_rgba(0,161,214,0.10),_transparent_28%),linear-gradient(180deg,_#f8fafc_0%,_#f1f5f9_100%)] text-slate-800 app-fade-in">
       <div className="fixed top-4 right-4 z-[100] w-[min(360px,calc(100vw-2rem))] space-y-2">
         {toasts.map(t => {
           const toneCls =
@@ -939,10 +1103,10 @@ function App() {
           )
         })}
       </div>
-      <div className="flex min-h-screen">
+      <div className="flex h-screen overflow-hidden">
         <div className={`fixed inset-0 z-40 bg-black/30 ${sidebarOpen ? '' : 'hidden'}`} onClick={() => setSidebarOpen(false)} />
 
-        <aside className={`fixed z-50 inset-y-0 left-0 w-72 bg-white border-r border-slate-200 flex flex-col transform transition-transform md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:static md:w-64`}>
+        <aside className={`fixed z-50 inset-y-0 left-0 w-72 h-screen bg-white border-r border-slate-200 flex flex-col transform transition-transform md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:static md:w-64 md:h-screen md:flex-shrink-0`}>
           <div className="h-16 flex items-center justify-between px-6 border-b border-slate-200">
             <div className="flex items-center">
               <Tv className="w-6 h-6 text-[var(--color-bili-pink)] mr-2" />
@@ -973,12 +1137,44 @@ function App() {
               <div className="flex flex-wrap gap-2 px-3">{runtimePills}</div>
             </div>
 
+            <div className="mt-3 px-3">
+              <div className="rounded-xl border border-slate-200 bg-white p-3">
+                <div className="text-sm font-semibold">{t('dashboard.runtimeCard')}</div>
+                <div className="mt-2 space-y-1 text-xs text-slate-600">
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t('dashboard.concurrencyLimit')}</span>
+                    <span className="font-mono">{runtimeSnapshot.maxConcurrentTasks}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t('dashboard.segmentConcurrency')}</span>
+                    <span className="font-mono">{runtimeSnapshot.concurrentSegments}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t('dashboard.downloadingTasks')}</span>
+                    <span className="font-mono">{runtimeSnapshot.downloadingTasks}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t('dashboard.queuedTasks')}</span>
+                    <span className="font-mono">{runtimeSnapshot.queuedTasks}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t('dashboard.pausedTasks')}</span>
+                    <span className="font-mono">{runtimeSnapshot.pausedTasks}</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span>{t('dashboard.failedTasks')}</span>
+                    <span className="font-mono">{runtimeSnapshot.failedTasks}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="mt-4 px-3">
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 rounded-full overflow-hidden bg-white border border-slate-200 flex items-center justify-center">
                     {me?.logged_in && me.face ? (
-                      <img src={`/api/avatar?url=${encodeURIComponent(me.face)}`} alt="" className="w-full h-full object-cover" />
+                      <img src={buildApiUrl(`/api/avatar?url=${encodeURIComponent(me.face)}`)} alt="" className="w-full h-full object-cover" />
                     ) : null}
                   </div>
                   <div className="min-w-0">
@@ -1061,7 +1257,7 @@ function App() {
           </div>
         </aside>
 
-        <main className="flex-1 flex flex-col min-h-screen">
+        <main className="flex-1 flex flex-col h-screen overflow-hidden">
           <div className="h-16 flex items-center justify-between px-4 sm:px-6 border-b border-slate-200 bg-white md:hidden">
             <button className="p-2 rounded hover:bg-slate-100" onClick={() => setSidebarOpen(true)}>
               <Menu className="w-5 h-5" />
@@ -1072,7 +1268,7 @@ function App() {
 
           <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
             {page === 'downloads' && (
-              <div className="max-w-6xl mx-auto">
+              <div className="max-w-[min(100%,96rem)] mx-auto">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
                   <div>
                     <div className="text-2xl font-bold tracking-tight">{t('dashboard.downloadsTitle')}</div>
@@ -1134,7 +1330,7 @@ function App() {
                           </button>
                           <div className="h-px bg-slate-100 my-1 mx-2" />
                           <button
-                            onClick={() => { window.open(`/api/export-tsv?proxy=${exportUseProxy}`, '_blank'); setShowAdvanced(false); }}
+                            onClick={() => { window.open(buildApiUrl(`/api/export-tsv?proxy=${exportUseProxy}`), '_blank'); setShowAdvanced(false); }}
                             className="w-full flex items-center px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
                           >
                             <Download className="w-4 h-4 mr-3 text-slate-400" />
@@ -1153,22 +1349,31 @@ function App() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
-                  <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                <div className="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-6">
+                  {runtimeCards.map(card => (
+                    <div key={card.label} className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm">
+                      <div className="text-sm text-slate-500">{card.label}</div>
+                      <div className={`text-2xl font-bold mt-1 ${card.tone}`}>{card.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 mb-6">
+                  <div className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm">
                     <div className="text-sm text-slate-500">{t('common.records')}</div>
                     <div className="text-2xl font-bold mt-1">{replays.length}</div>
                   </div>
-                  <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                  <div className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm">
                     <div className="text-sm text-slate-500">{t('common.active')}</div>
                     <div className="text-2xl font-bold mt-1">{activeDownloading}</div>
                   </div>
-                  <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                  <div className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm">
                     <div className="text-sm text-slate-500">{t('common.mode')}</div>
                     <div className="text-2xl font-bold mt-1">{paused ? t('common.paused') : t('common.running')}</div>
                   </div>
                 </div>
 
-                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                <div className="app-card rounded-2xl border border-white/70 bg-white/90 overflow-hidden backdrop-blur-sm">
                   <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex items-center justify-between">
                     <h2 className="font-semibold flex items-center">
                       <Download className="w-5 h-5 text-slate-500 mr-2" />
@@ -1182,7 +1387,8 @@ function App() {
                     )}
 
                     {replays.map(r => {
-                      const p = progressMap[r.live_key]
+                      const rawProgress = progressMap[r.live_key]
+                      const p = shouldUseRealtimeProgress(rawProgress, r) ? rawProgress : undefined
                       const displayStatus = p?.status || r.status
                       const baseProgress = Math.max(0, Math.min(100, p?.progress ?? r.progress ?? 0))
                       const mergeProgress = Math.max(0, Math.min(100, p?.merge_progress ?? 0))
@@ -1209,9 +1415,9 @@ function App() {
                           ? 'bg-[var(--color-bili-blue)]'
                           : 'bg-slate-400'
                       return (
-                        <div key={r.ID} className="p-4 sm:p-5 hover:bg-slate-50 transition">
-                          <div className="flex gap-4 items-start">
-                            <div className="w-32 h-20 bg-slate-200 rounded-lg overflow-hidden flex-shrink-0 relative">
+                        <div key={r.ID} className="p-4 sm:p-5 hover:bg-slate-50/80 transition-colors duration-300">
+                          <div className="flex flex-col xl:flex-row gap-4 items-stretch xl:items-start">
+                            <div className="w-full sm:w-44 xl:w-32 h-28 sm:h-24 xl:h-20 bg-slate-200 rounded-xl overflow-hidden flex-shrink-0 relative shadow-sm">
                               {r.local_cover ? (
                                 <img src={getCoverUrl(r.local_cover)!} className="w-full h-full object-cover" />
                               ) : (
@@ -1220,15 +1426,15 @@ function App() {
                             </div>
 
                             <div className="flex-1 min-w-0">
-                              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                              <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3">
                                 <div className="min-w-0">
                                   <Tooltip content={r.title}>
-                                    <div className="font-medium text-slate-900 truncate">{r.title}</div>
+                                    <div className="font-medium text-slate-900 break-words leading-6">{r.title}</div>
                                   </Tooltip>
-                                  <div className="text-[11px] text-slate-400 font-mono mt-1 truncate">{r.live_key}</div>
+                                  <div className="text-[11px] text-slate-400 font-mono mt-1 break-all">{r.live_key}</div>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <span className={`inline-flex items-center gap-2 text-xs font-medium px-2 py-1 rounded border border-slate-200 bg-white`}>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className={`inline-flex items-center gap-2 text-xs font-medium px-2 py-1 rounded-full border border-slate-200 bg-white shadow-sm`}>
                                     <span className={`w-2 h-2 rounded-full ${statusColor(displayStatus)}`}></span>
                                     {displayStatus.toUpperCase()}
                                   </span>
@@ -1240,17 +1446,17 @@ function App() {
                                 </div>
                               </div>
 
-                              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
+                              <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-500">
                                 <span>{t('common.start')}: {new Date(r.start_time * 1000).toLocaleString()}</span>
                                 <span>{t('common.duration')}: {Math.floor(r.duration / 60)}m</span>
                                 <span>{t('common.size')}: {formatBytes(r.file_size)}</span>
                                 {p?.speed ? <span>{t('common.speed')}: {p.speed}</span> : null}
                               </div>
 
-                              <div className="mt-3">
-                                <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                              <div className="mt-4">
+                                <div className="w-full bg-slate-200/80 rounded-full h-2 overflow-hidden">
                                   <div
-                                    className={`${barColor} h-1.5 rounded-full transition-all duration-500`}
+                                    className={`${barColor} h-2 rounded-full transition-all duration-500 ease-out`}
                                     style={{ width: `${showProgress ? displayProgress : (displayStatus === 'completed' ? 100 : 0)}%` }}
                                   />
                                 </div>
@@ -1260,9 +1466,9 @@ function App() {
                                 </div>
                                 {displayStatus === 'merging' ? (
                                   <div className="mt-2">
-                                    <div className="w-full bg-slate-200 rounded-full h-1 overflow-hidden">
+                                    <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
                                       <div
-                                        className="bg-[var(--color-bili-pink)] h-1 rounded-full transition-all duration-500"
+                                        className="bg-[var(--color-bili-pink)] h-1.5 rounded-full transition-all duration-500 ease-out"
                                         style={{ width: `${mergeProgress}%` }}
                                       />
                                     </div>
@@ -1275,12 +1481,12 @@ function App() {
                               </div>
                             </div>
 
-                            <div className="flex flex-col gap-2">
+                            <div className="flex flex-row xl:flex-col flex-wrap gap-2 xl:w-auto">
                               {['failed', 'deleted', 'not_downloaded'].includes(displayStatus) && (
                                 <button
                                   onClick={() => handleDownload(r.live_key)}
                                   disabled={!backendOnline || paused}
-                                  className="p-2 text-slate-500 hover:text-[var(--color-bili-blue)] rounded bg-white border border-slate-200 shadow-sm transition disabled:opacity-50"
+                                  className="p-2.5 text-slate-500 hover:text-[var(--color-bili-blue)] rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5 disabled:opacity-50"
                                 >
                                   <Tooltip content={t('dashboard.startBtn')}>
                                     <Play className="w-4 h-4" />
@@ -1291,7 +1497,7 @@ function App() {
                                 <button
                                   onClick={() => handlePauseReplay(r.live_key)}
                                   disabled={!backendOnline}
-                                  className="p-2 text-slate-500 hover:text-amber-500 rounded bg-white border border-slate-200 shadow-sm transition disabled:opacity-50"
+                                  className="p-2.5 text-slate-500 hover:text-amber-500 rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5 disabled:opacity-50"
                                 >
                                   <Tooltip content={t('dashboard.pauseBtn')}>
                                     <Pause className="w-4 h-4" />
@@ -1302,16 +1508,16 @@ function App() {
                                 <button
                                   onClick={() => handleResumeReplay(r.live_key)}
                                   disabled={!backendOnline || paused}
-                                  className="p-2 text-slate-500 hover:text-green-600 rounded bg-white border border-slate-200 shadow-sm transition disabled:opacity-50"
+                                  className="p-2.5 text-slate-500 hover:text-green-600 rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5 disabled:opacity-50"
                                 >
                                   <Tooltip content={t('dashboard.resumeBtn')}>
                                     <Play className="w-4 h-4" />
                                   </Tooltip>
                                 </button>
                               )}
-                              <button
-                                onClick={() => setSelectedReplay(r)}
-                                className="p-2 text-slate-500 hover:text-slate-800 rounded bg-white border border-slate-200 shadow-sm transition"
+                                <button
+                                  onClick={() => setSelectedLiveKey(r.live_key)}
+                                className="p-2.5 text-slate-500 hover:text-slate-800 rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5"
                               >
                                 <Tooltip content={t('common.details')}>
                                   <Wrench className="w-4 h-4" />
@@ -1328,20 +1534,28 @@ function App() {
             )}
 
             {page === 'settings' && (
-              <div className="max-w-4xl mx-auto">
-                <div className="flex items-center justify-between mb-6">
+              <div className="max-w-5xl mx-auto">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
                   <div>
                     <div className="text-2xl font-bold tracking-tight">{t('settings.configTitle')}</div>
                     <div className="text-sm text-slate-500 mt-1">{t('settings.configDesc')}</div>
                   </div>
-                  <button
-                    onClick={handleSaveConfig}
-                    disabled={!backendOnline || paused || savingConfig || !config}
-                    className="flex items-center px-4 py-2 bg-[var(--color-bili-pink)] hover:opacity-90 text-white rounded-lg font-medium transition disabled:opacity-50"
-                  >
-                    <RefreshCcw className={`w-4 h-4 mr-2 ${savingConfig ? 'animate-spin' : ''}`} />
-                    {savingConfig ? t('settings.saving') : t('common.save')}
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={handleQuitApp}
+                      className="flex items-center px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg font-medium transition hover:bg-slate-50"
+                    >
+                      退出程序
+                    </button>
+                    <button
+                      onClick={handleSaveConfig}
+                      disabled={!backendOnline || paused || savingConfig || !config}
+                      className="flex items-center px-4 py-2 bg-[var(--color-bili-pink)] hover:opacity-90 text-white rounded-lg font-medium transition disabled:opacity-50"
+                    >
+                      <RefreshCcw className={`w-4 h-4 mr-2 ${savingConfig ? 'animate-spin' : ''}`} />
+                      {savingConfig ? t('settings.saving') : t('common.save')}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden mb-6">
@@ -1422,18 +1636,18 @@ function App() {
       </div>
 
       {selectedReplay && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full overflow-hidden">
-            <div className="p-6 border-b flex justify-between items-center">
+        <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 z-50 app-fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full max-h-[88vh] overflow-hidden border border-white/70">
+            <div className="p-4 sm:p-6 border-b flex justify-between items-center">
               <h3 className="text-xl font-bold text-gray-900">{t('dashboard.detailsTitle')}</h3>
-              <button onClick={() => setSelectedReplay(null)} className="text-gray-400 hover:text-gray-600">✕</button>
+              <button onClick={() => setSelectedLiveKey(null)} className="text-gray-400 hover:text-gray-600">✕</button>
             </div>
-            <div className="p-6 space-y-6">
-              <div className="flex gap-6">
+            <div className="p-4 sm:p-6 space-y-6 overflow-y-auto max-h-[calc(88vh-76px)]">
+              <div className="flex flex-col xl:flex-row gap-6">
                 {selectedReplay.local_cover && (
-                  <img src={getCoverUrl(selectedReplay.local_cover)!} alt="" className="w-48 h-28 object-cover rounded-lg shadow-sm" />
+                  <img src={getCoverUrl(selectedReplay.local_cover)!} alt="" className="w-full xl:w-72 h-44 xl:h-40 object-cover rounded-xl shadow-sm" />
                 )}
-                <div className="grid grid-cols-2 gap-x-8 gap-y-4 flex-1">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-4 flex-1">
                   <div>
                     <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.status')}</label>
                     <p className="capitalize font-medium">{selectedReplay.status}</p>
@@ -1453,7 +1667,7 @@ function App() {
                 </div>
               </div>
 
-              <div className="grid grid-cols-3 gap-4 p-4 bg-gray-50 rounded-lg">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 p-4 bg-gray-50 rounded-xl">
                 <div>
                   <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('common.resolution')}</label>
                   <p className="font-medium">{selectedReplay.resolution || 'N/A'}</p>
@@ -1471,7 +1685,7 @@ function App() {
               <div>
                 <label className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">{t('dashboard.currentMessage')}</label>
                 <div className={`mt-1 p-3 rounded bg-gray-50 font-mono text-sm border ${selectedReplay.status === 'failed' ? 'border-red-100 text-red-600 bg-red-50' : 'border-gray-100'}`}>
-                  {progressMap[selectedReplay.live_key]?.message || selectedReplay.message || '-'}
+                  {(shouldUseRealtimeProgress(progressMap[selectedReplay.live_key], selectedReplay) ? progressMap[selectedReplay.live_key]?.message : undefined) || selectedReplay.message || '-'}
                 </div>
               </div>
 
@@ -1523,17 +1737,17 @@ function App() {
                 ) : null}
               </div>
 
-              <div className="flex items-center justify-between gap-3 pt-4 border-t">
+              <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3 pt-4 border-t">
                 <button
                   onClick={() => handleDeleteReplayFile(selectedReplay)}
                   disabled={!backendOnline || !selectedReplay.file_path}
-                  className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors shadow-sm disabled:opacity-50"
+                  className="w-full sm:w-auto px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors shadow-sm disabled:opacity-50"
                 >
                   {t('dashboard.deleteFile')}
                 </button>
                 <button
-                  onClick={() => setSelectedReplay(null)}
-                  className="px-8 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
+                  onClick={() => setSelectedLiveKey(null)}
+                  className="w-full sm:w-auto px-8 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors shadow-sm"
                 >
                   {t('common.close')}
                 </button>
@@ -1600,7 +1814,7 @@ function App() {
           </div>
         </div>
       )}
-    {showLoginModal && <LoginModal onClose={() => setShowLoginModal(false)} onSuccess={() => { setShowLoginModal(false); fetchMe(); }} />}
+    {showLoginModal && <LoginModal apiClient={apiClient} onClose={() => setShowLoginModal(false)} onSuccess={() => { setShowLoginModal(false); fetchMe(); }} />}
       </div>
   )
 }
