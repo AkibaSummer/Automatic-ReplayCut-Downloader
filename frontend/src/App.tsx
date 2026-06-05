@@ -1084,7 +1084,8 @@ function App() {
     const canvasRef = useRef<HTMLCanvasElement>(null)
     const audioCtxRef = useRef<AudioContext | null>(null)
     const sourceRef = useRef<AudioBufferSourceNode | null>(null)
-    const dragRef = useRef<'start' | 'end' | null>(null)
+    const dragRef = useRef<'start' | 'end' | 'pan' | null>(null)
+    const panStartRef = useRef<{ x: number; offset: number } | null>(null)
 
     // Create ONE AudioContext at mount time, never close until unmount
     useEffect(() => {
@@ -1095,11 +1096,18 @@ function App() {
       }
     }, [])
 
-    const fmtTime = (s: number) => {
+    const fmtTime = useCallback((s: number) => {
       const m = Math.floor(s / 60)
       const sec = (s % 60).toFixed(1)
       return `${m}:${String(sec).padStart(4, '0')}`
-    }
+    }, [])
+
+    const fmtTimeLong = useCallback((s: number) => {
+      const h = Math.floor(s / 3600)
+      const m = Math.floor((s % 3600) / 60)
+      const sec = s % 60
+      return `${h}:${String(m).padStart(2, '0')}:${sec.toFixed(1).padStart(4, '0')}`
+    }, [])
 
     const formatBandwidth = (bps: number) => {
       if (bps >= 1000000) return `${(bps / 1000000).toFixed(1)} Mbps`
@@ -1167,85 +1175,49 @@ function App() {
       const dur = buffer.duration
       const viewStart = Math.max(0, Math.min(dur - zoomWindow, scrollOffset - zoomWindow / 2))
       const viewEnd = Math.min(dur, viewStart + zoomWindow)
-      const viewDur = viewEnd - viewStart
+      const viewDur = Math.max(0.1, viewEnd - viewStart)
 
       const data = buffer.getChannelData(0)
       const sampleRate = buffer.sampleRate
       const startSample = Math.floor(viewStart * sampleRate)
       const endSample = Math.min(data.length, Math.ceil(viewEnd * sampleRate))
       const viewSamples = endSample - startSample
-
       if (viewSamples <= 0) return
 
       const step = Math.ceil(viewSamples / w)
-      const peaks: number[] = []
-      for (let i = 0; i < w; i++) {
-        let max = 0
-        const s = startSample + i * step
-        const e = Math.min(startSample + (i + 1) * step, data.length)
-        for (let j = s; j < e; j++) {
-          const v = Math.abs(data[j])
-          if (v > max) max = v
-        }
-        peaks.push(max)
-      }
-
       ctx.clearRect(0, 0, w, h)
-
       const mid = h / 2
       const pixelsPerSecond = w / viewDur
       const startX = (startTime - viewStart) * pixelsPerSecond
       const endX = (endTime - viewStart) * pixelsPerSecond
 
-      // Draw waveform bars
-      for (let i = 0; i < peaks.length; i++) {
-        const barH = peaks[i] * mid * 1.2
-        const x = i
-        if (x >= startX && x <= endX) {
-          ctx.fillStyle = 'rgba(0,161,214,0.7)'
-        } else {
-          ctx.fillStyle = 'rgba(148,163,184,0.55)'
-        }
-        ctx.fillRect(x, mid - barH / 2, 1.5, Math.max(1, barH))
+      for (let i = 0; i < w; i++) {
+        let max = 0
+        const s = startSample + i * step
+        const e = Math.min(startSample + (i + 1) * step, data.length)
+        for (let j = s; j < e; j++) { const v = Math.abs(data[j]); if (v > max) max = v }
+        const barH = max * mid * 1.2
+        const inRange = i >= startX && i <= endX
+        ctx.fillStyle = inRange ? 'rgba(0,161,214,0.7)' : 'rgba(148,163,184,0.55)'
+        ctx.fillRect(i, mid - barH / 2, 1.5, Math.max(1, barH))
       }
+      if (endX > startX) { ctx.fillStyle = 'rgba(0,161,214,0.08)'; ctx.fillRect(startX, 0, endX - startX, h) }
 
-      // Draw selection overlay
-      if (endX > startX) {
-        ctx.fillStyle = 'rgba(0,161,214,0.08)'
-        ctx.fillRect(startX, 0, endX - startX, h)
-      }
-
-      // Draw handles
       const drawHandle = (x: number, label: string) => {
-        ctx.strokeStyle = 'rgba(0,161,214,0.9)'
-        ctx.lineWidth = 2
-        ctx.beginPath()
-        ctx.moveTo(x, 0)
-        ctx.lineTo(x, h)
-        ctx.stroke()
+        ctx.strokeStyle = 'rgba(0,161,214,0.9)'; ctx.lineWidth = 2
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke()
         ctx.fillStyle = 'rgba(0,161,214,1)'
-        ctx.beginPath()
-        ctx.arc(x, 0, 6, 0, Math.PI * 2)
-        ctx.fill()
-        ctx.fillStyle = '#fff'
-        ctx.font = '10px sans-serif'
-        ctx.textAlign = 'center'
+        ctx.beginPath(); ctx.arc(x, 0, 6, 0, Math.PI * 2); ctx.fill()
+        ctx.fillStyle = '#fff'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center'
         ctx.fillText(label, Math.max(15, Math.min(w - 15, x)), 16)
       }
-
       if (startX >= 0 && startX <= w) drawHandle(startX, fmtTime(startTime))
       if (endX >= 0 && endX <= w) drawHandle(endX, fmtTime(endTime))
     }, [audioBuffer, startTime, endTime, zoomWindow, scrollOffset, fmtTime])
 
     useEffect(() => {
       if (audioBuffer && videoInfo) drawWaveform()
-    }, [audioBuffer, startTime, endTime, drawWaveform, videoInfo])
-
-    useEffect(() => {
-      const handleResize = () => { if (audioBuffer) drawWaveform() }
-      window.addEventListener('resize', handleResize)
-      return () => window.removeEventListener('resize', handleResize)
-    }, [audioBuffer, drawWaveform])
+    }, [drawWaveform, audioBuffer, videoInfo])
 
     useEffect(() => {
       return () => {
@@ -1257,56 +1229,63 @@ function App() {
 
     const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!audioBuffer || !videoInfo) return
-      const canvas = canvasRef.current
-      if (!canvas) return
+      const canvas = canvasRef.current; if (!canvas) return
       const rect = canvas.getBoundingClientRect()
       const x = e.clientX - rect.left
-      const viewStart = Math.max(0, Math.min(audioBuffer.duration - zoomWindow, scrollOffset - zoomWindow / 2))
-      const viewDur = Math.min(audioBuffer.duration - viewStart, zoomWindow)
-      const pixelsPerSecond = rect.width / viewDur
-      const startX = (startTime - viewStart) * pixelsPerSecond
-      const endX = (endTime - viewStart) * pixelsPerSecond
-      const threshold = 10
-      if (Math.abs(x - startX) < threshold) {
-        dragRef.current = 'start'
-      } else if (Math.abs(x - endX) < threshold) {
-        dragRef.current = 'end'
+      const dur = audioBuffer.duration
+      const viewStart = Math.max(0, Math.min(dur - zoomWindow, scrollOffset - zoomWindow / 2))
+      const viewDur = Math.min(dur - viewStart, zoomWindow)
+      const pps = rect.width / viewDur
+      const startX = (startTime - viewStart) * pps
+      const endX = (endTime - viewStart) * pps
+      const threshold = 12
+      if (Math.abs(x - startX) < threshold) { dragRef.current = 'start' }
+      else if (Math.abs(x - endX) < threshold) { dragRef.current = 'end' }
+      else {
+        dragRef.current = 'pan'
+        panStartRef.current = { x: e.clientX, offset: scrollOffset }
       }
     }
 
     const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!dragRef.current || !audioBuffer || !videoInfo) return
-      const canvas = canvasRef.current
-      if (!canvas) return
+      const canvas = canvasRef.current; if (!canvas) return
       const rect = canvas.getBoundingClientRect()
-      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
-      const viewStart = Math.max(0, Math.min(audioBuffer.duration - zoomWindow, scrollOffset - zoomWindow / 2))
-      const viewDur = Math.min(audioBuffer.duration - viewStart, zoomWindow)
-      const t = viewStart + (x / rect.width) * viewDur
-      if (dragRef.current === 'start') {
-        setStartTime(Math.max(0, Math.min(endTime - 0.5, t)))
-      } else {
-        setEndTime(Math.max(startTime + 0.5, Math.min(audioBuffer.duration, t)))
+      const dur = audioBuffer.duration
+      if (dragRef.current === 'pan' && panStartRef.current) {
+        const dx = (panStartRef.current.x - e.clientX) * (zoomWindow / rect.width)
+        setScrollOffset(Math.max(zoomWindow / 2, Math.min(dur - zoomWindow / 2, panStartRef.current.offset + dx)))
+        return
       }
+      const viewStart = Math.max(0, Math.min(dur - zoomWindow, scrollOffset - zoomWindow / 2))
+      const viewDur = Math.min(dur - viewStart, zoomWindow)
+      const t = viewStart + (Math.max(0, Math.min(rect.width, e.clientX - rect.left)) / rect.width) * viewDur
+      if (dragRef.current === 'start') setStartTime(Math.max(0, Math.min(endTime - 0.5, t)))
+      else setEndTime(Math.max(startTime + 0.5, Math.min(dur, t)))
     }
 
-    const handleCanvasMouseUp = () => {
-      dragRef.current = null
-    }
+    const handleCanvasMouseUp = () => { dragRef.current = null; panStartRef.current = null }
 
     const handleCanvasWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
       if (!audioBuffer) return
       e.preventDefault()
-      const shift = (e.deltaY / 100) * (zoomWindow / 4)
-      setScrollOffset(prev => Math.max(zoomWindow / 2, Math.min(audioBuffer.duration - zoomWindow / 2, prev + shift * 10)))
-    }
+      const canvas = canvasRef.current; if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      const dur = audioBuffer.duration
+      const viewStart = Math.max(0, Math.min(dur - zoomWindow, scrollOffset - zoomWindow / 2))
+      const cursorTime = viewStart + ((e.clientX - rect.left) / rect.width) * zoomWindow
 
-    const doZoomIn = () => setZoomWindow(prev => Math.max(10, prev / 2))
-    const doZoomOut = () => setZoomWindow(prev => Math.min(audioBuffer?.duration || 3600, prev * 2))
-    const doScrollLeft = () => setScrollOffset(prev => Math.max(zoomWindow / 2, prev - zoomWindow / 4))
-    const doScrollRight = () => {
-      if (!audioBuffer) return
-      setScrollOffset(prev => Math.min(audioBuffer.duration - zoomWindow / 2, prev + zoomWindow / 4))
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl+Wheel = zoom at cursor
+        const factor = e.deltaY > 0 ? 1.5 : 1 / 1.5
+        const newZoom = Math.max(5, Math.min(dur, zoomWindow * factor))
+        setZoomWindow(newZoom)
+        setScrollOffset(Math.max(newZoom / 2, Math.min(dur - newZoom / 2, cursorTime)))
+      } else {
+        // Plain wheel = pan/scroll
+        const shift = (e.deltaY / 100) * (zoomWindow / 2)
+        setScrollOffset(Math.max(zoomWindow / 2, Math.min(dur - zoomWindow / 2, scrollOffset + shift)))
+      }
     }
 
     const playPreview = () => {
@@ -1497,12 +1476,8 @@ function App() {
           <div className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm space-y-4">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="text-sm font-semibold text-slate-700">Audio Waveform</div>
-              <div className="flex items-center gap-1">
-                <button onClick={doZoomIn} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Zoom In">Zoom In</button>
-                <button onClick={doZoomOut} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Zoom Out">Zoom Out</button>
-                <button onClick={doScrollLeft} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Scroll Left">←</button>
-                <button onClick={doScrollRight} className="px-2 py-1 text-xs border border-slate-300 rounded-md bg-white hover:bg-slate-50 transition" title="Scroll Right">→</button>
-                <span className="text-xs text-slate-400 ml-1">{fmtTime(zoomWindow)} window</span>
+              <div className="text-xs text-slate-400">
+                Ctrl+Wheel zoom · drag to pan · {fmtTime(zoomWindow)} view
               </div>
             </div>
             {audioLoading ? (
