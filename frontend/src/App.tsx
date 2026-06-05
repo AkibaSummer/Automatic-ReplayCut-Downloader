@@ -11,6 +11,7 @@ import {
   PauseCircle,
   Play,
   RefreshCcw,
+  Scissors,
   Settings,
   Tv,
   Wrench,
@@ -115,7 +116,7 @@ interface DiskStats {
   used_by_service_bytes: number
 }
 
-type PageKey = 'downloads' | 'settings'
+type PageKey = 'downloads' | 'settings' | 'clip'
 
 type FsEntry = { name: string; path: string }
 type FsListResponse = { current: string; parent: string; entries: FsEntry[] }
@@ -1065,6 +1066,406 @@ function App() {
     { label: t('dashboard.pausedTasks'), value: runtimeSnapshot.pausedTasks, tone: 'text-slate-600' },
   ]
 
+  function ClipPage() {
+    const [url, setUrl] = useState('')
+    const [videoInfo, setVideoInfo] = useState<{ title: string; duration: number; author: string; cover: string; audioProxyPath: string } | null>(null)
+    const [startTime, setStartTime] = useState(0)
+    const [endTime, setEndTime] = useState(30)
+    const [clipLoading, setClipLoading] = useState(false)
+    const [clipError, setClipError] = useState('')
+    const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null)
+    const [playing, setPlaying] = useState(false)
+    const [clipResult, setClipResult] = useState<{ fileName: string; path: string } | null>(null)
+    const [audioLoading, setAudioLoading] = useState(false)
+    const canvasRef = useRef<HTMLCanvasElement>(null)
+    const audioCtxRef = useRef<AudioContext | null>(null)
+    const sourceRef = useRef<AudioBufferSourceNode | null>(null)
+    const dragRef = useRef<'start' | 'end' | null>(null)
+
+    const fmtTime = (s: number) => {
+      const m = Math.floor(s / 60)
+      const sec = (s % 60).toFixed(1)
+      return `${m}:${String(sec).padStart(4, '0')}`
+    }
+
+    const fetchInfo = async () => {
+      setClipLoading(true)
+      setClipError('')
+      setVideoInfo(null)
+      setAudioBuffer(null)
+      setClipResult(null)
+      try {
+        const res = await apiClient.post('/api/clip/info', { url })
+        const info = res.data as { title: string; duration: number; author: string; cover: string; audioProxyPath: string }
+        setVideoInfo(info)
+        setStartTime(0)
+        setEndTime(Math.min(info.duration, 30))
+        if (info.audioProxyPath) {
+          loadAudio(info.audioProxyPath)
+        }
+      } catch (e) {
+        setClipError(getErrorMessage(e))
+      }
+      setClipLoading(false)
+    }
+
+    const loadAudio = async (proxyPath: string) => {
+      setAudioLoading(true)
+      try {
+        const audioCtx = new AudioContext()
+        audioCtxRef.current = audioCtx
+        const audioUrl = proxyPath.startsWith('http') ? proxyPath : `${apiBase}${proxyPath}`
+        const resp = await apiClient.get(audioUrl, { responseType: 'arraybuffer' })
+        const buffer = await audioCtx.decodeAudioData(resp.data as ArrayBuffer)
+        setAudioBuffer(buffer)
+      } catch (e) {
+        showToast({ tone: 'error', title: 'Failed to load audio', message: getErrorMessage(e) })
+      }
+      setAudioLoading(false)
+    }
+
+    const drawWaveform = useCallback(() => {
+      const canvas = canvasRef.current
+      const buffer = audioBuffer
+      if (!canvas || !buffer) return
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      const dpr = window.devicePixelRatio || 1
+      const rect = canvas.getBoundingClientRect()
+      const w = rect.width
+      const h = rect.height
+      canvas.width = w * dpr
+      canvas.height = h * dpr
+      ctx.scale(dpr, dpr)
+      canvas.style.width = w + 'px'
+      canvas.style.height = h + 'px'
+
+      const data = buffer.getChannelData(0)
+      const step = Math.ceil(data.length / w)
+      const peaks: number[] = []
+      for (let i = 0; i < w; i++) {
+        let max = 0
+        const start = i * step
+        const end = Math.min(start + step, data.length)
+        for (let j = start; j < end; j++) {
+          const v = Math.abs(data[j])
+          if (v > max) max = v
+        }
+        peaks.push(max)
+      }
+
+      ctx.clearRect(0, 0, w, h)
+
+      const mid = h / 2
+      const dur = buffer.duration
+      const startX = (startTime / dur) * w
+      const endX = (endTime / dur) * w
+
+      // Draw waveform bars
+      for (let i = 0; i < peaks.length; i++) {
+        const barH = peaks[i] * mid * 1.2
+        const x = i
+        if (x >= startX && x <= endX) {
+          ctx.fillStyle = 'rgba(0,161,214,0.7)'
+        } else {
+          ctx.fillStyle = 'rgba(148,163,184,0.55)'
+        }
+        ctx.fillRect(x, mid - barH / 2, 1.5, Math.max(1, barH))
+      }
+
+      // Draw selection overlay
+      ctx.fillStyle = 'rgba(0,161,214,0.08)'
+      ctx.fillRect(startX, 0, endX - startX, h)
+
+      // Draw handles
+      const drawHandle = (x: number, label: string) => {
+        ctx.strokeStyle = 'rgba(0,161,214,0.9)'
+        ctx.lineWidth = 2
+        ctx.beginPath()
+        ctx.moveTo(x, 0)
+        ctx.lineTo(x, h)
+        ctx.stroke()
+        // handle top knob
+        ctx.fillStyle = 'rgba(0,161,214,1)'
+        ctx.beginPath()
+        ctx.arc(x, 0, 6, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.fillStyle = '#fff'
+        ctx.font = '10px sans-serif'
+        ctx.textAlign = 'center'
+        ctx.fillText(label, Math.max(15, Math.min(w - 15, x)), 16)
+      }
+
+      drawHandle(startX, fmtTime(startTime))
+      drawHandle(endX, fmtTime(endTime))
+    }, [audioBuffer, startTime, endTime, fmtTime])
+
+    useEffect(() => {
+      if (audioBuffer && videoInfo) drawWaveform()
+    }, [audioBuffer, startTime, endTime, drawWaveform, videoInfo])
+
+    useEffect(() => {
+      const handleResize = () => { if (audioBuffer) drawWaveform() }
+      window.addEventListener('resize', handleResize)
+      return () => window.removeEventListener('resize', handleResize)
+    }, [audioBuffer, drawWaveform])
+
+    useEffect(() => {
+      return () => {
+        if (sourceRef.current) {
+          try { sourceRef.current.stop() } catch {}
+        }
+        if (audioCtxRef.current && audioCtxRef.current.state !== 'closed') {
+          audioCtxRef.current.close().catch(() => {})
+        }
+      }
+    }, [])
+
+    const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!audioBuffer || !videoInfo) return
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const dur = audioBuffer.duration
+      const startX = (startTime / dur) * rect.width
+      const endX = (endTime / dur) * rect.width
+      const threshold = 10
+      if (Math.abs(x - startX) < threshold) {
+        dragRef.current = 'start'
+      } else if (Math.abs(x - endX) < threshold) {
+        dragRef.current = 'end'
+      }
+    }
+
+    const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!dragRef.current || !audioBuffer || !videoInfo) return
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+      const t = (x / rect.width) * audioBuffer.duration
+      if (dragRef.current === 'start') {
+        setStartTime(Math.max(0, Math.min(endTime - 0.5, t)))
+      } else {
+        setEndTime(Math.max(startTime + 0.5, Math.min(audioBuffer.duration, t)))
+      }
+    }
+
+    const handleCanvasMouseUp = () => {
+      dragRef.current = null
+    }
+
+    const playPreview = () => {
+      if (!audioBuffer) return
+      const ctx = audioCtxRef.current
+      if (!ctx || ctx.state === 'closed') return
+      if (ctx.state === 'suspended') ctx.resume()
+      if (sourceRef.current) {
+        try { sourceRef.current.stop() } catch {}
+      }
+      const source = ctx.createBufferSource()
+      source.buffer = audioBuffer
+      source.connect(ctx.destination)
+      const offset = Math.max(0, startTime)
+      const dur = Math.max(0.1, endTime - startTime)
+      source.start(0, offset, dur)
+      source.onended = () => setPlaying(false)
+      sourceRef.current = source
+      setPlaying(true)
+    }
+
+    const stopPreview = () => {
+      if (sourceRef.current) {
+        try { sourceRef.current.stop() } catch {}
+        sourceRef.current = null
+      }
+      setPlaying(false)
+    }
+
+    const executeClip = async () => {
+      if (!videoInfo) return
+      setClipLoading(true)
+      setClipError('')
+      try {
+        const res = await apiClient.post('/api/clip/execute', { url, startTime, endTime })
+        setClipResult(res.data as { fileName: string; path: string })
+        showToast({ tone: 'success', title: 'Clip completed', message: (res.data as { fileName: string }).fileName })
+      } catch (e) {
+        setClipError(getErrorMessage(e))
+        showToast({ tone: 'error', title: 'Clip failed', message: getErrorMessage(e) })
+      }
+      setClipLoading(false)
+    }
+
+    return (
+      <div className="max-w-4xl mx-auto p-6 space-y-6">
+        <div className="flex items-center gap-3 mb-2">
+          <Scissors className="w-6 h-6 text-[var(--color-bili-blue)]" />
+          <h2 className="text-2xl font-bold tracking-tight">{t('common.clip')}</h2>
+        </div>
+
+        {/* URL Input + Fetch */}
+        <div className="flex gap-3">
+          <input
+            value={url}
+            onChange={e => setUrl(e.target.value)}
+            placeholder="https://www.bilibili.com/video/BV..."
+            className="flex-1 px-4 py-3 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-[var(--color-bili-blue)] focus:border-transparent outline-none transition"
+            onKeyDown={e => { if (e.key === 'Enter') fetchInfo() }}
+          />
+          <button
+            onClick={fetchInfo}
+            disabled={clipLoading || !url.trim()}
+            className="px-6 py-3 bg-[var(--color-bili-blue)] text-white font-medium rounded-xl hover:brightness-110 transition disabled:opacity-50"
+          >
+            {clipLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Fetch Info'}
+          </button>
+        </div>
+
+        {clipError && (
+          <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-red-700 text-sm">{clipError}</div>
+        )}
+
+        {/* Video Info Card */}
+        {videoInfo && (
+          <div className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm space-y-4">
+            <div className="flex gap-4">
+              {videoInfo.cover && (
+                <img
+                  src={videoInfo.cover.startsWith('http') ? videoInfo.cover : `${apiBase}${videoInfo.cover}`}
+                  alt=""
+                  className="w-40 h-24 object-cover rounded-lg flex-shrink-0"
+                />
+              )}
+              <div className="min-w-0">
+                <div className="font-semibold text-slate-900 text-lg leading-6 truncate">{videoInfo.title}</div>
+                <div className="text-sm text-slate-500 mt-1">By {videoInfo.author}</div>
+                <div className="text-sm text-slate-500 mt-0.5">{t('common.duration')}: {fmtTime(videoInfo.duration)}</div>
+              </div>
+            </div>
+
+            {/* Time Range Inputs */}
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-medium text-slate-600">{t('common.startTime')}:</label>
+                <input
+                  type="number"
+                  value={startTime}
+                  onChange={e => setStartTime(Math.max(0, Math.min(endTime - 0.5, parseFloat(e.target.value) || 0)))}
+                  step="0.1"
+                  min="0"
+                  max={videoInfo.duration}
+                  className="w-20 px-2 py-1.5 border border-slate-300 rounded-lg text-sm text-center focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none"
+                />
+                <span className="text-xs text-slate-400">{t('common.sec')}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-medium text-slate-600">{t('common.endTime')}:</label>
+                <input
+                  type="number"
+                  value={endTime}
+                  onChange={e => setEndTime(Math.max(startTime + 0.5, Math.min(videoInfo.duration, parseFloat(e.target.value) || 0)))}
+                  step="0.1"
+                  min="0"
+                  max={videoInfo.duration}
+                  className="w-20 px-2 py-1.5 border border-slate-300 rounded-lg text-sm text-center focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none"
+                />
+                <span className="text-xs text-slate-400">{t('common.sec')}</span>
+              </div>
+              <div className="text-xs text-slate-400">({fmtTime(endTime - startTime)})</div>
+            </div>
+
+            {/* Range sliders */}
+            <div className="space-y-1">
+              <input
+                type="range"
+                value={startTime}
+                onChange={e => setStartTime(Math.max(0, Math.min(endTime - 0.5, parseFloat(e.target.value))))}
+                min="0"
+                max={videoInfo.duration}
+                step="0.1"
+                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-[var(--color-bili-blue)]"
+              />
+              <input
+                type="range"
+                value={endTime}
+                onChange={e => setEndTime(Math.max(startTime + 0.5, Math.min(videoInfo.duration, parseFloat(e.target.value))))}
+                min="0"
+                max={videoInfo.duration}
+                step="0.1"
+                className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-[var(--color-bili-blue)]"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Waveform */}
+        {(audioBuffer || audioLoading) && (
+          <div className="app-card rounded-2xl border border-white/70 bg-white/90 p-5 backdrop-blur-sm space-y-4">
+            <div className="text-sm font-semibold text-slate-700">Audio Waveform</div>
+            {audioLoading ? (
+              <div className="flex items-center justify-center h-32 text-slate-400">
+                <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                Loading audio...
+              </div>
+            ) : audioBuffer ? (
+              <canvas
+                ref={canvasRef}
+                className="w-full h-24 rounded-lg bg-slate-50 border border-slate-200 cursor-col-resize"
+                onMouseDown={handleCanvasMouseDown}
+                onMouseMove={handleCanvasMouseMove}
+                onMouseUp={handleCanvasMouseUp}
+                onMouseLeave={handleCanvasMouseUp}
+              />
+            ) : null}
+
+            {/* Play/Pause */}
+            {audioBuffer && (
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={playing ? stopPreview : playPreview}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium hover:bg-slate-50 transition"
+                >
+                  {playing ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+                  {playing ? 'Stop' : 'Play Preview'}
+                </button>
+                <span className="text-xs text-slate-500">
+                  {fmtTime(startTime)} – {fmtTime(endTime)}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Execute Clip */}
+        {videoInfo && (
+          <div className="flex items-center gap-4">
+            <button
+              onClick={executeClip}
+              disabled={clipLoading || !audioBuffer}
+              className="flex items-center gap-2 px-6 py-3 bg-[var(--color-bili-pink)] text-white font-medium rounded-xl hover:brightness-110 transition disabled:opacity-50"
+            >
+              {clipLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Scissors className="w-5 h-5" />}
+              Execute Clip
+            </button>
+          </div>
+        )}
+
+        {/* Result */}
+        {clipResult && (
+          <div className="p-4 rounded-xl bg-green-50 border border-green-200 space-y-1">
+            <div className="flex items-center gap-2 text-green-700 text-sm font-semibold">
+              <CheckCircle className="w-4 h-4" />
+              Clip completed successfully!
+            </div>
+            <div className="text-sm text-green-600 font-mono">{clipResult.fileName}</div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="h-screen overflow-hidden bg-[radial-gradient(circle_at_top_right,_rgba(0,161,214,0.10),_transparent_28%),linear-gradient(180deg,_#f8fafc_0%,_#f1f5f9_100%)] text-slate-800 app-fade-in">
       <div className="fixed top-4 right-4 z-[100] w-[min(360px,calc(100vw-2rem))] space-y-2">
@@ -1131,6 +1532,13 @@ function App() {
             >
               <Settings className="w-5 h-5 mr-3" />
               {t('common.settings')}
+            </button>
+            <button
+              onClick={() => { setPage('clip'); setSidebarOpen(false) }}
+              className={`w-full flex items-center px-3 py-2 text-sm font-medium rounded-md ${page === 'clip' ? 'bg-stone-100 text-[var(--color-bili-blue)]' : 'text-slate-700 hover:bg-slate-50'}`}
+            >
+              <Scissors className="w-5 h-5 mr-3" />
+              {t('common.clip')}
             </button>
 
             <div className="pt-4">
@@ -1631,6 +2039,8 @@ function App() {
                 </div>
               </div>
             )}
+
+            {page === 'clip' && <ClipPage />}
           </div>
         </main>
       </div>

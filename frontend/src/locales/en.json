@@ -44,7 +44,8 @@
     "loginSuccess": "Login Successful!",
     "loginExpired": "QR code expired, please refresh",
     "loginFailed": "Login Failed:",
-    "loginRefresh": "Refresh QR Code"
+    "loginRefresh": "Refresh QR Code",
+    "clip": "Video Clip"
   },
   "dashboard": {
     "downloadsTitle": "Downloads",

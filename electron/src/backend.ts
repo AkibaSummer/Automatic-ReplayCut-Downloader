@@ -141,6 +141,14 @@ const END_LAYOUT_RE = /\{end:([^}]+)\}/g
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
 
+function formatSeconds(totalSeconds: number) {
+  const safe = Math.max(0, Math.floor(totalSeconds))
+  const h = Math.floor(safe / 3600)
+  const m = Math.floor((safe % 3600) / 60)
+  const s = safe % 60
+  return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+}
+
 function deepMerge<T>(base: T, patch: Partial<T>): T {
   if (Array.isArray(base) || Array.isArray(patch)) {
     return (patch ?? base) as T
@@ -761,6 +769,42 @@ class DesktopBackend {
         return
       }
       res.sendFile(fullPath)
+    })
+
+    // --- 视频切片 API ---
+    this.app.post('/api/clip/info', async (req, res) => {
+      try {
+        const info = await this.getBilibiliVideoInfo(req.body.url || '')
+        const audioProxyPath = `/api/clip/audio-proxy?url=${encodeURIComponent(info.audioUrl)}`
+        res.json({ ...info, audioProxyPath })
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    this.app.get('/api/clip/audio-proxy', async (req, res) => {
+      try {
+        const url = req.query.url as string
+        if (!url) throw new Error('Missing audio URL')
+        const response = await this.fetchWithCookies(url)
+        res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
+        res.setHeader('content-length', response.headers.get('content-length') || '')
+        res.setHeader('accept-ranges', 'bytes')
+        const buffer = Buffer.from(await response.arrayBuffer())
+        res.send(buffer)
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    this.app.post('/api/clip/execute', async (req, res) => {
+      try {
+        const { url, startTime, endTime } = req.body
+        const result = await this.executeClip(url, Number(startTime) || 0, Number(endTime) || 0)
+        res.json(result)
+      } catch (error) {
+        this.sendError(res, error)
+      }
     })
   }
 
@@ -2025,6 +2069,59 @@ class DesktopBackend {
     const m = Math.floor((safe % 3600) / 60)
     const s = safe % 60
     return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  }
+
+  // --- B站视频切片 ---
+
+  private parseBilibiliUrl(url: string): { type: 'bv' | 'av'; id: string } | null {
+    const bvMatch = url.match(/BV([a-zA-Z0-9]+)/)
+    if (bvMatch) return { type: 'bv', id: `BV${bvMatch[1]}` }
+    const avMatch = url.match(/av(\d+)/i)
+    if (avMatch) return { type: 'av', id: avMatch[1] }
+    return null
+  }
+
+  private async getBilibiliVideoInfo(rawUrl: string) {
+    const parsed = this.parseBilibiliUrl(rawUrl)
+    if (!parsed) throw new Error('无法解析 B站视频链接')
+    const queryParam = parsed.type === 'bv' ? `bvid=${parsed.id}` : `aid=${parsed.id}`
+    const info = await this.fetchJSON<{ code: number; message: string; data: { title: string; duration: number; cid: number; owner: { name: string; face: string }; pic: string; stat: { view: number; danmaku: number } } }>(
+      `https://api.bilibili.com/x/web-interface/view?${queryParam}`,
+    )
+    if (info.code !== 0) throw new Error(info.message || '获取视频信息失败')
+    const { title, duration, cid, owner, pic } = info.data
+
+    // Get audio stream URL
+    const playUrl = await this.fetchJSON<{ code: number; data: { dash?: { audio: Array<{ base_url: string; bandwidth: number; codecs: string }> } } }>(
+      `https://api.bilibili.com/x/player/playurl?${queryParam}&cid=${cid}&fnval=4048`,
+    )
+    const audioList = playUrl?.data?.dash?.audio || []
+    if (audioList.length === 0) throw new Error('无法获取音频流')
+    // Pick highest quality audio
+    audioList.sort((a, b) => b.bandwidth - a.bandwidth)
+    const audioUrl = audioList[0].base_url
+
+    return { title, duration, cid, author: owner.name, cover: pic, audioUrl, audioCodec: audioList[0].codecs || 'aac' }
+  }
+
+  private async executeClip(rawUrl: string, startTime: number, endTime: number) {
+    if (startTime < 0) startTime = 0
+    if (endTime <= startTime) throw new Error('结束时间必须大于开始时间')
+    const info = await this.getBilibiliVideoInfo(rawUrl)
+    if (endTime > info.duration) endTime = info.duration
+
+    const clipDir = path.join(this.config.download.output_dir, 'clips')
+    this.ensureDir(clipDir)
+    const safeTitle = sanitizeFilename(info.title || 'clip')
+    const ts = `${formatSeconds(startTime)}-${formatSeconds(endTime)}`
+    const outPath = uniquePath(path.join(clipDir, `[cut] ${safeTitle} (${ts}).m4a`))
+
+    const response = await this.fetchWithCookies(info.audioUrl)
+    if (!response.ok) throw new Error(`音频下载失败: ${response.status}`)
+    const buffer = Buffer.from(await response.arrayBuffer())
+    fs.writeFileSync(outPath, buffer)
+
+    return { path: outPath, fileName: path.basename(outPath), size: fs.statSync(outPath).size, title: info.title, duration: info.duration, startTime, endTime }
   }
 
   private throwIfAborted(signal: AbortSignal) {
