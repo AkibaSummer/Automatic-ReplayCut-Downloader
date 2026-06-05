@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "express": "^4.21.2",
+    "mp4-muxer": "^5.2.2",
     "music-metadata": "^11.12.3",
     "sql.js": "^1.13.0",
     "ws": "^8.18.0",
