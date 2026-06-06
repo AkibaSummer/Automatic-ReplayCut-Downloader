@@ -621,8 +621,17 @@ class DesktopBackend {
       try {
         const pageToken = (req.query.page_token as string) || undefined
         const limit = Math.min(Number(req.query.limit) || 20, 200)
-        const keyword = (req.query.keyword as string) || undefined
-        const result = await this.feishuClient.listClippableRecords(pageToken, limit, keyword)
+        const keyword = ((req.query.keyword as string) || '').trim().toLowerCase()
+        const result = await this.feishuClient.listClippableRecords(pageToken, limit)
+
+        // Client-side keyword filtering (server filter doesn't support rich-text 'contains')
+        if (keyword) {
+          result.records = result.records.filter(r =>
+            r.song_name.toLowerCase().includes(keyword)
+          )
+          result.total = result.records.length
+        }
+
         res.json(result)
       } catch (error) {
         this.sendError(res, error)
