@@ -873,7 +873,7 @@ function App() {
           <div className="h-16 flex items-center justify-between px-6 border-b border-slate-200">
             <div className="flex items-center">
               <Tv className="w-6 h-6 text-[var(--color-bili-pink)] mr-2" />
-              <h1 className="font-bold text-lg tracking-tight">Replay Manager</h1>
+              <h1 className="font-bold text-lg tracking-tight">随缘公会工作台</h1>
             </div>
             <button className="md:hidden p-2 rounded hover:bg-slate-100" onClick={() => setSidebarOpen(false)}>
               <X className="w-5 h-5" />
@@ -1045,7 +1045,7 @@ function App() {
             <button className="p-2 rounded hover:bg-slate-100" onClick={() => setSidebarOpen(true)}>
               <Menu className="w-5 h-5" />
             </button>
-            <div className="font-semibold">Replay Manager</div>
+            <div className="font-semibold">随缘公会工作台</div>
             <div className="w-9" />
           </div>
 

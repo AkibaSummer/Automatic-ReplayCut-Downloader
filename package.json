@@ -40,7 +40,7 @@
   },
   "build": {
     "appId": "com.akibasummer.replaymanager",
-    "productName": "Replay Manager",
+    "productName": "随缘公会工作台",
     "directories": {
       "output": "release\\electron"
     },

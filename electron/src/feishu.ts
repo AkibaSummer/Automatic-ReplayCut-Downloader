@@ -203,18 +203,14 @@ export class FeishuClient {
     const { base_token, table_id } = this.config
     const path = `/open-apis/bitable/v1/apps/${base_token}/tables/${table_id}/records/search`
 
+    // Checkbox fields require boolean value, not string
     const conditions: any[] = [{
       field_name: '纯享可切',
       operator: 'is',
-      value: ['true'],
+      value: [true],
     }]
-    if (keyword && keyword.trim()) {
-      conditions.push({
-        field_name: '歌名',
-        operator: 'contains',
-        value: [keyword.trim()],
-      })
-    }
+    // NOTE: keyword filtering is done client-side after fetch,
+    // because 歌名 may be a rich-text field that doesn't support server-side 'contains'.
 
     const body: any = {
       page_size: pageSize,
