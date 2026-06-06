@@ -405,7 +405,9 @@ class DesktopBackend {
       try {
         const url = req.query.url as string
         if (!url) throw new Error('Missing cover URL')
-        const response = await this.bilibiliClient.fetchWithCookies(url)
+        // Use native fetch for images because Chromium net.fetch might block cross-origin HTTP images
+        const response = await fetch(url, { headers: { 'Referer': 'https://www.bilibili.com/' } })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const contentType = response.headers.get('content-type') || 'image/jpeg'
         res.setHeader('content-type', contentType)
         res.setHeader('cache-control', 'public, max-age=86400')
@@ -522,7 +524,7 @@ class DesktopBackend {
 
         // Execute in background
         this.clipService.executeClip(
-          url, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
+          url, title, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
           (progress) => {
             this.db.updateClipTask(taskId, { progress, status: 'processing' })
             this.emitClipTaskUpdate(taskId)
@@ -909,13 +911,15 @@ class DesktopBackend {
       const filename = `${liveKey}${ext}`
       const fullPath = path.join(this.config.download.output_dir, 'covers', filename)
       if (!fs.existsSync(fullPath)) {
-        const response = await this.bilibiliClient.fetchWithCookies(coverUrl, {
+        const response = await fetch(coverUrl, {
           headers: {
             referer: 'https://live.bilibili.com/',
             origin: 'https://live.bilibili.com',
           },
         })
-        await fsp.writeFile(fullPath, Buffer.from(await response.arrayBuffer()))
+        if (!response.ok) return ''
+        const buffer = Buffer.from(await response.arrayBuffer())
+        await fsp.writeFile(fullPath, buffer)
       }
       return filename
     } catch {

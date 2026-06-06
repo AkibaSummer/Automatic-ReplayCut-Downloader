@@ -25,7 +25,7 @@ export class ClipService {
     private baseDir: string,
   ) {}
 
-  public async executeClip(rawUrl: string, startTime: number, endTime: number, audioQualityIndex: number = 0, videoQualityIndex: number = 0, onProgress?: (p: number) => void) {
+  public async executeClip(rawUrl: string, title: string, startTime: number, endTime: number, audioQualityIndex: number = 0, videoQualityIndex: number = 0, onProgress?: (p: number) => void) {
     if (startTime < 0) startTime = 0
     if (endTime <= startTime) throw new Error('结束时间必须大于开始时间')
     const info = await this.bilibiliClient.getBilibiliVideoInfo(rawUrl)
@@ -54,7 +54,7 @@ export class ClipService {
 
     const clipDir = resolveAppPathWithBase(this.baseDir, this.config.download.clip_output_dir || path.join(this.config.download.output_dir, 'clips'))
     ensureDir(clipDir)
-    const safeTitle = sanitizeFilename(info.title || 'clip')
+    const safeTitle = sanitizeFilename(title || info.title || 'clip')
     const ts = `${formatSeconds(startTime)}-${formatSeconds(endTime)}`.replace(/:/g, '-')
     // Export to MP4 since we are including video
     const outPath = uniquePath(path.join(clipDir, `[cut] ${safeTitle} (${ts}).mp4`))
