@@ -1,7 +1,7 @@
 {
   "name": "automatic-replaycut-downloader-desktop",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Electron + React desktop app for Bilibili replay management",
   "main": "electron-dist/main.js",
   "type": "commonjs",
@@ -49,7 +49,10 @@
       "node_modules/ffmpeg-static/**/*",
       "node_modules/sql.js/dist/sql-wasm.wasm"
     ],
-    "electronLanguages": ["zh-CN", "en-US"],
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
     "files": [
       "electron-dist/**/*",
       "frontend/dist/**/*",
