@@ -1,0 +1,38 @@
+# AI Architecture Guidelines
+
+## 1. Modularity & File Size
+- **DO NOT** create monolithic files (e.g., massive `App.tsx` or `backend.ts`).
+- Keep files small, focused, and under ~300-500 lines.
+- Split concerns: React UI components, React hooks, API routes, Database operations, and business logic should live in separate files.
+
+## 2. Memory & Performance Management
+- **Never** write large buffers (like video/audio ArrayBuffers) synchronously to disk using `fs.writeFileSync`.
+- **Always** use Node.js Streams (`fs.createWriteStream`) when handling large files to avoid OOM (Out of Memory) errors.
+- Limit concurrent processing tasks to avoid crashing the event loop.
+
+## 3. Database Operations
+- When using in-memory databases backed by disk (like `sql.js`), **do not** synchronously flush the entire database to disk on every state change.
+- Use debouncing or periodic saves for frequent status updates.
+- Keep database schema and queries in dedicated modules.
+
+## 4. Error Handling
+- Do not suppress errors with empty catch blocks. Log them properly.
+- Return meaningful HTTP status codes and error messages from API endpoints.
+- Unhandled Promise Rejections must be caught and gracefully handled.
+
+## 5. Directory Structure
+- `electron/src/`: Contains main process logic, strictly typed, avoiding `any`.
+  - `api/`: Express route definitions
+  - `db/`: Database access layers
+  - `services/`: Core logic (e.g., downloading, video processing)
+  - `utils/`: Helpers and constants
+  - `types/`: Shared TypeScript definitions
+- `frontend/src/`: Contains React renderer logic
+  - `components/`: Reusable UI elements
+  - `pages/`: Main view containers
+  - `hooks/`: Custom React hooks (e.g., polling, WebSocket)
+  - `types/`: Shared TypeScript interfaces
+
+## 6. Typescript Rules
+- Enable and respect strict mode.
+- Avoid using `any`; define strict interfaces for all data structures.

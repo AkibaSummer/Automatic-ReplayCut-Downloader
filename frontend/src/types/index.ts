@@ -1,0 +1,109 @@
+import type { AxiosInstance } from 'axios'
+
+export interface Replay {
+  ID: number
+  UpdatedAt: string
+  replay_id: number
+  live_key: string
+  title: string
+  start_time: number
+  end_time: number
+  duration: number
+  status: string
+  message: string
+  file_path: string
+  cover_url: string
+  local_cover: string
+  file_size: number
+  resolution: string
+  bitrate: string
+  progress: number
+  speed: string
+  elapsed: string
+  eta: string
+  verify_ok: boolean
+  actual_duration: number
+  cover_src?: string
+  streams?: StreamSlice[]
+}
+
+export interface StreamSlice {
+  replay_id: number
+  start_time: number
+  end_time: number
+  stream: string
+  type: number
+  m3u8_text: string
+}
+
+export interface Config {
+  bilibili: {
+    anchor_id: number
+  }
+  download: {
+    output_dir: string
+    filename_template: string
+    max_concurrent_tasks: number
+    concurrent_segments: number
+    clip_output_dir: string
+  }
+}
+
+export interface Progress {
+  live_key: string
+  progress: number
+  merge_progress: number
+  status: string
+  message: string
+  speed: string
+  speed_history: number[]
+  elapsed: string
+  eta: string
+}
+
+export interface Me {
+  logged_in: boolean
+  uname: string
+  face: string
+}
+
+export interface Runtime {
+  paused: boolean
+  max_concurrent_tasks: number
+  concurrent_segments: number
+  downloading_tasks: number
+  queued_tasks: number
+  paused_tasks: number
+  failed_tasks: number
+}
+
+export interface ScanSummary {
+  fetched: number
+  new_records: number
+  updated_records: number
+  covers_updated: number
+  marked_deleted: number
+  already_up_to_date: number
+}
+
+export interface DiskStats {
+  path: string
+  total_bytes: number
+  free_bytes: number
+  used_by_service_bytes: number
+}
+
+export type PageKey = 'downloads' | 'settings' | 'clip'
+
+export type FsEntry = { name: string; path: string }
+export type FsListResponse = { current: string; parent: string; entries: FsEntry[] }
+
+export type ToastTone = 'loading' | 'success' | 'error' | 'info'
+export type Toast = { id: number; tone: ToastTone; title: string; message?: string }
+
+export interface ClipPageProps {
+  apiClient: AxiosInstance
+  apiBase: string
+  showToast: (toast: { tone: ToastTone; title: string; message?: string; durationMs?: number }) => void
+  t: (key: string, options?: any) => string
+}
