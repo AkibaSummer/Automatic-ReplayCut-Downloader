@@ -122,3 +122,27 @@ export type ClipTaskRecord = {
   status: 'pending' | 'processing' | 'done' | 'error'
   message: string
 }
+
+export type FeishuRecord = {
+  record_id: string
+  song_name: string
+  replay_url: string
+  replay_link_text: string
+  start_time: string
+  end_time: string
+  date: string
+}
+
+export type FeishuPageResult = {
+  records: FeishuRecord[]
+  has_more: boolean
+  page_token: string
+  total: number
+}
+
+export type FeishuSetupStatus = {
+  ok: boolean
+  stage: 'not_configured' | 'token_failed' | 'no_permission' | 'ready'
+  message: string
+  hint?: string
+}

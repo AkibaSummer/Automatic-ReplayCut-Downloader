@@ -1,6 +1,6 @@
 import path from 'node:path'
 
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 
 import { startDesktopBackend } from './backend'
 
@@ -38,6 +38,15 @@ async function createMainWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
+  })
+
+  // Intercept window.open() calls from the renderer —
+  // open external URLs (e.g. Feishu OAuth) in the system browser
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      shell.openExternal(url)
+    }
+    return { action: 'deny' }
   })
 
   const distIndex = path.join(__dirname, '..', 'frontend', 'dist', 'index.html')

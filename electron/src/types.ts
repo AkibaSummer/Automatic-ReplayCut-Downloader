@@ -18,6 +18,12 @@ export type AppConfig = {
   server: {
     port: number
   }
+  feishu: {
+    app_id: string
+    app_secret: string
+    base_token: string
+    table_id: string
+  }
 }
 
 export type ReplayRecord = {

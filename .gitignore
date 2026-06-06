@@ -52,3 +52,12 @@ debug-*.md
 # Patch / intermediate files
 patch*.js
 reference
+
+# Test & debug scripts
+test-*.ts
+test-*.js
+probe-test.js
+scripts/
+
+# Clip output
+clips/

@@ -24,6 +24,12 @@ export const DEFAULT_CONFIG: AppConfig = {
   server: {
     port: 8081,
   },
+  feishu: {
+    app_id: '',
+    app_secret: '',
+    base_token: 'ZSmDbR9HEaViOWssgzIc3SZhn7c',
+    table_id: 'tblH7nVh6cpx8x3X',
+  },
 }
 
 export function deepMerge<T>(base: T, patch: Partial<T>): T {
@@ -70,6 +76,9 @@ export function normalizeConfigWithBase(baseDir: string, config: AppConfig): App
   normalized.bilibili.anchor_id ||= 0
   normalized.server.port ||= DEFAULT_CONFIG.server.port
   normalized.bilibili.cookies ||= {}
+  normalized.feishu ||= { ...DEFAULT_CONFIG.feishu }
+  normalized.feishu.base_token ||= DEFAULT_CONFIG.feishu.base_token
+  normalized.feishu.table_id ||= DEFAULT_CONFIG.feishu.table_id
   return normalized
 }
 

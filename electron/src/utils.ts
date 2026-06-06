@@ -14,7 +14,13 @@ export function formatSeconds(totalSeconds: number) {
 }
 
 export function sanitizeFilename(name: string) {
-  return name.replace(/[\\/:*?"<>|]/g, '_').trim()
+  return name
+    .replace(/[\x00-\x1f\x7f]/g, '')           // Remove control characters
+    .replace(/[\u200b-\u200f\u2028-\u202f\ufeff]/g, '') // Remove zero-width / invisible Unicode chars
+    .replace(/[\\/:*?"<>|]/g, '_')              // Replace Windows-illegal chars
+    .replace(/\s+/g, ' ')                       // Collapse whitespace (incl. newlines)
+    .replace(/_+/g, '_')                        // Collapse multiple underscores
+    .trim()
 }
 
 export function formatDate(date: Date, layout: string) {

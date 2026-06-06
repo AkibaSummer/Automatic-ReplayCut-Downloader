@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  AlertCircle,
   CheckCircle,
+  ChevronDown,
+  ChevronUp,
   Edit3,
   FolderOpen,
   Loader2,
+  Music,
   Pause,
   Play,
+  RefreshCw,
   Scissors,
+  Upload,
 } from 'lucide-react'
-import type { ClipPageProps } from './types'
+import type { ClipPageProps, FeishuRecord, FeishuPageResult } from './types'
 import { getErrorMessage } from './utils'
 
 /** Parse time strings like "1:14:06", "30:00", "90" into seconds */
@@ -59,6 +65,40 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   const [clipOutputDir, setClipOutputDir] = useState('')
   const [showClipDialog, setShowClipDialog] = useState(false)
   const [clipTitle, setClipTitle] = useState('')
+  const [clipPrefixCut, setClipPrefixCut] = useState(true)
+  const [clipSuffixTime, setClipSuffixTime] = useState(true)
+  const [clipMode, setClipMode] = useState<'copy' | 'reencode'>('copy')
+
+  // --- Feishu song list state ---
+  const [feishuOpen, setFeishuOpen] = useState(false)
+  const [feishuRecords, setFeishuRecords] = useState<FeishuRecord[]>([])
+  const [feishuHasMore, setFeishuHasMore] = useState(false)
+  const [feishuNextPageToken, setFeishuNextPageToken] = useState('')
+  const [feishuLoading, setFeishuLoading] = useState(false)
+  const [feishuLoadingMore, setFeishuLoadingMore] = useState(false)
+  const [feishuError, setFeishuError] = useState('')
+  const [feishuWritingBack, setFeishuWritingBack] = useState<string | null>(null)
+  const [activeFeishuRecord, setActiveFeishuRecord] = useState<FeishuRecord | null>(null)
+  const [feishuKeyword, setFeishuKeyword] = useState('')
+  const feishuSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const feishuScrollRef = useRef<HTMLDivElement>(null)
+  const PAGE_SIZE = 20
+
+  // --- Feishu setup state ---
+  const [feishuStatus, setFeishuStatus] = useState<import('./types').FeishuSetupStatus | null>(null)
+  const [feishuSetupAppId, setFeishuSetupAppId] = useState('')
+  const [feishuSetupSecret, setFeishuSetupSecret] = useState('')
+  const [feishuSetupSaving, setFeishuSetupSaving] = useState(false)
+  const [feishuSetupStep, setFeishuSetupStep] = useState(1)
+
+  // Check feishu status on mount
+  useEffect(() => {
+    apiClient.get('/api/feishu/status').then(res => {
+      setFeishuStatus(res.data)
+    }).catch(() => {
+      setFeishuStatus({ ok: false, stage: 'not_configured', message: '无法连接后端' })
+    })
+  }, [apiClient])
 
   // Fetch clip output directory on mount
   useEffect(() => {
@@ -115,9 +155,9 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       const info = res.data as { title: string; duration: number; author: string; cover: string; audioProxyPath: string; qualities?: { audio: { id: number; bandwidth: number; codecs: string; baseUrl?: string }[]; video: { id: number; bandwidth: number; codecs: string; width: number; height: number; frameRate: string; baseUrl?: string }[] } }
       setVideoInfo(info)
       setStartTime(0)
-      setEndTime(Math.min(info.duration, 30))
-      setScrollOffset(Math.min(info.duration, 30) / 2)
-      setZoomWindow(120)
+      setEndTime(info.duration)
+      setScrollOffset(info.duration / 2)
+      setZoomWindow(info.duration + 40)
     } catch (e) {
       setClipError(getErrorMessage(e))
     }
@@ -165,9 +205,13 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       }
     }
     
-    // Collect chunks that need loading (not loaded, not currently in-flight)
+    // Collect chunks that need loading — only those near the current viewport
+    // Buffer: load 2 extra chunks beyond each edge of the visible area
+    const BUFFER_CHUNKS = 2
+    const visStartChunk = Math.max(0, Math.floor(viewStart / CHUNK_DURATION) - BUFFER_CHUNKS)
+    const visEndChunk = Math.min(totalChunks - 1, Math.floor(viewEnd / CHUNK_DURATION) + BUFFER_CHUNKS)
     const loadable: number[] = []
-    for (let i = 0; i < totalChunks; i++) {
+    for (let i = visStartChunk; i <= visEndChunk; i++) {
       if (!chunkStatus[i] && !inflight.has(i)) loadable.push(i)
     }
     if (loadable.length === 0) return
@@ -179,8 +223,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     const freeSlots = Math.max(0, 3 - inflight.size)
     if (freeSlots === 0) return
 
-    // Only load chunks within a reasonable distance
-    const toLoad = loadable.slice(0, freeSlots).filter(c => chunkPriority(c) < 600)
+    const toLoad = loadable.slice(0, freeSlots)
     if (toLoad.length === 0) return
 
     toLoad.forEach(chunkIdx => {
@@ -445,7 +488,10 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
         startTime, 
         endTime, 
         audioQualityIndex,
-        videoQualityIndex 
+        videoQualityIndex,
+        prefixCut: clipPrefixCut,
+        suffixTime: clipSuffixTime,
+        clipMode,
       })
       showToast({ tone: 'success', title: 'Added to Task Queue', message: `Task ID: ${res.data.taskId}` })
       setShowClipDialog(false)
@@ -456,9 +502,139 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     setClipLoading(false)
   }
 
+  // --- Feishu setup methods ---
+  const saveFeishuSetup = async () => {
+    setFeishuSetupSaving(true)
+    try {
+      const res = await apiClient.post('/api/feishu/config', {
+        app_id: feishuSetupAppId.trim(),
+        app_secret: feishuSetupSecret.trim(),
+      })
+      setFeishuStatus(res.data)
+      if (res.data.ok) {
+        showToast({ tone: 'success', title: t('feishu.setupSuccess'), message: '' })
+        fetchFeishuRecords(true)
+      }
+    } catch (e) {
+      showToast({ tone: 'error', title: t('feishu.setupFailed'), message: getErrorMessage(e) })
+    }
+    setFeishuSetupSaving(false)
+  }
+
+  // --- Feishu song list methods ---
+  const fetchFeishuRecords = async (reset = true, searchKeyword?: string) => {
+    const kw = searchKeyword !== undefined ? searchKeyword : feishuKeyword
+    if (reset) {
+      setFeishuLoading(true)
+      setFeishuError('')
+    } else {
+      setFeishuLoadingMore(true)
+    }
+    try {
+      const token = reset ? '' : feishuNextPageToken
+      const params = `page_token=${encodeURIComponent(token)}&limit=${PAGE_SIZE}&keyword=${encodeURIComponent(kw)}`
+      const res = await apiClient.get<FeishuPageResult>(`/api/feishu/records?${params}`)
+      const data = res.data
+      if (reset) {
+        setFeishuRecords(data.records)
+      } else {
+        setFeishuRecords(prev => [...prev, ...data.records])
+      }
+      setFeishuHasMore(data.has_more)
+      setFeishuNextPageToken(data.page_token || '')
+    } catch (e) {
+      const msg = getErrorMessage(e)
+      setFeishuError(msg)
+      showToast({ tone: 'error', title: t('feishu.fetchFailed'), message: msg })
+    }
+    setFeishuLoading(false)
+    setFeishuLoadingMore(false)
+  }
+
+  const handleFeishuFill = (rec: FeishuRecord) => {
+    if (!rec.replay_url) {
+      showToast({ tone: 'error', title: t('feishu.noReplayUrl'), message: rec.song_name })
+      return
+    }
+    const normalizedUrl = rec.replay_url.replace(/^http:\/\//, 'https://')
+    setUrl(normalizedUrl)
+    setClipTitle(rec.song_name)
+    setActiveFeishuRecord(rec)
+    const parsedStart = parseTimeInput(rec.start_time)
+    const parsedEnd = parseTimeInput(rec.end_time)
+    if (parsedStart !== null) setStartTime(parsedStart)
+    if (parsedEnd !== null) setEndTime(parsedEnd)
+    // Auto-trigger fetch info after URL is set
+    setTimeout(() => {
+      setClipLoading(true)
+      setClipError('')
+      setVideoInfo(null)
+      setChunkPeaks({})
+      setChunkStatus({})
+      setAudioQualityIndex(0)
+      apiClient.post('/api/clip/info', { url: normalizedUrl }).then(res => {
+        const info = res.data as any
+        setVideoInfo(info)
+        // Keep the feishu times instead of resetting
+        const s = parsedStart ?? 0
+        const e2 = parsedEnd ?? info.duration
+        if (parsedStart === null) setStartTime(0)
+        if (parsedEnd === null) setEndTime(info.duration)
+        // Zoom to show the selected range with 20s padding on each side
+        const rangeLen = e2 - s
+        const zoomW = rangeLen + 40 // 20s padding each side
+        setZoomWindow(Math.min(zoomW, info.duration + 40))
+        setScrollOffset(s + rangeLen / 2)
+      }).catch(e => {
+        setClipError(getErrorMessage(e))
+      }).finally(() => {
+        setClipLoading(false)
+      })
+    }, 50)
+  }
+
+  const handleFeishuWriteback = async (rec: FeishuRecord) => {
+    setFeishuWritingBack(rec.record_id)
+    try {
+      await apiClient.put(`/api/feishu/records/${rec.record_id}`, {
+        fields: {
+          '录播时间': formatTimeInput(startTime),
+          '结束时间': formatTimeInput(endTime),
+        }
+      })
+      showToast({ tone: 'success', title: t('feishu.writebackOk'), message: rec.song_name })
+      setFeishuRecords(prev => prev.map(r =>
+        r.record_id === rec.record_id
+          ? { ...r, start_time: formatTimeInput(startTime), end_time: formatTimeInput(endTime) }
+          : r
+      ))
+    } catch (e) {
+      showToast({ tone: 'error', title: t('feishu.writebackFailed'), message: getErrorMessage(e) })
+    }
+    setFeishuWritingBack(null)
+  }
+
+  // Infinite scroll handler
+  const handleFeishuScroll = useCallback(() => {
+    const el = feishuScrollRef.current
+    if (!el || !feishuHasMore || feishuLoadingMore) return
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) {
+      fetchFeishuRecords(false)
+    }
+  }, [feishuHasMore, feishuLoadingMore, feishuNextPageToken])
+
   const openClipDialog = () => {
     if (!videoInfo) return
-    setClipTitle(videoInfo.title)
+    if (activeFeishuRecord) {
+      const date = activeFeishuRecord.date ? activeFeishuRecord.date.split(' ')[0].replace(/-/g, '') : ''
+      setClipTitle(date ? `${date}_${activeFeishuRecord.song_name}` : activeFeishuRecord.song_name)
+      setClipPrefixCut(false)
+      setClipSuffixTime(false)
+    } else {
+      setClipTitle(videoInfo.title)
+      setClipPrefixCut(true)
+      setClipSuffixTime(true)
+    }
     setShowClipDialog(true)
   }
 
@@ -467,6 +643,232 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       <div className="flex items-center gap-3 mb-2">
         <Scissors className="w-6 h-6 text-[var(--color-bili-blue)]" />
         <h2 className="text-2xl font-bold tracking-tight">{t('common.clip')}</h2>
+      </div>
+
+      {/* Feishu Song List Panel */}
+      <div className="rounded-2xl border border-slate-200 bg-white/90 backdrop-blur-sm overflow-hidden">
+        <button
+          onClick={() => {
+            const willOpen = !feishuOpen
+            setFeishuOpen(willOpen)
+            if (willOpen && feishuStatus?.ok && feishuRecords.length === 0) fetchFeishuRecords()
+          }}
+          className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-slate-50 transition"
+        >
+          <div className="flex items-center gap-2.5">
+            <Music className="w-5 h-5 text-[var(--color-bili-pink)]" />
+            <span className="font-semibold text-sm">{t('feishu.songListTitle')}</span>
+            {feishuRecords.length > 0 && (
+              <span className="text-xs text-slate-400 bg-slate-100 rounded-full px-2 py-0.5">{feishuRecords.length}</span>
+            )}
+          </div>
+          {feishuOpen ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+        </button>
+
+        {feishuOpen && (
+          <div className="border-t border-slate-200">
+            {/* Toolbar with auth status */}
+            {/* Toolbar / Setup */}
+            {feishuStatus?.ok ? (
+              /* ✅ Ready — show fetch button */
+              <div className="flex items-center gap-2 px-5 py-2.5 bg-slate-50/80">
+                <span className="flex items-center gap-1.5 text-xs text-green-600 bg-green-50 border border-green-200 rounded-full px-2.5 py-1">
+                  <CheckCircle className="w-3 h-3" />
+                  {t('feishu.connected')}
+                </span>
+                <button
+                  onClick={() => fetchFeishuRecords(true)}
+                  disabled={feishuLoading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
+                >
+                  {feishuLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                  {feishuLoading ? t('feishu.fetchingBtn') : t('feishu.fetchBtn')}
+                </button>
+                {feishuError && <span className="text-xs text-red-500 truncate">{feishuError}</span>}
+              </div>
+            ) : (
+              /* 🔧 Setup guide */
+              <div className="px-5 py-4 bg-gradient-to-b from-slate-50 to-white space-y-3">
+                <div className="text-sm text-slate-600">
+                  {feishuStatus?.stage === 'no_permission' ? (
+                    <div className="flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                      <AlertCircle className="w-4 h-4 text-amber-500 mt-0.5 shrink-0" />
+                      <div>
+                        <p className="font-medium text-amber-700">{t('feishu.permissionError')}</p>
+                        <p className="text-xs text-amber-600 mt-1">{feishuStatus.hint || t('feishu.permissionHint')}</p>
+                        <button
+                          onClick={() => apiClient.get('/api/feishu/status').then(r => setFeishuStatus(r.data))}
+                          className="mt-2 text-xs text-[var(--color-bili-blue)] hover:underline"
+                        >
+                          {t('feishu.retryCheck')}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {/* Step indicator */}
+                      <div className="flex items-center gap-2">
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${feishuSetupStep === 1 ? 'bg-[var(--color-bili-blue)] text-white' : 'bg-slate-200 text-slate-500'}`}>1</div>
+                        <div className="h-px w-6 bg-slate-200" />
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${feishuSetupStep === 2 ? 'bg-[var(--color-bili-blue)] text-white' : 'bg-slate-200 text-slate-500'}`}>2</div>
+                      </div>
+
+                      {feishuSetupStep === 1 ? (
+                        <div className="space-y-3">
+                          <p className="text-sm font-medium text-slate-700">{t('feishu.setupStep1Title')}</p>
+                          <ol className="text-xs text-slate-500 space-y-1.5 list-decimal list-inside">
+                            <li>{t('feishu.setupStep1a')} <a href="https://open.feishu.cn/app" target="_blank" rel="noopener noreferrer" className="text-[var(--color-bili-blue)] hover:underline">{t('feishu.devConsole')} ↗</a></li>
+                            <li>{t('feishu.setupStep1b')}</li>
+                            <li>{t('feishu.setupStep1c')}</li>
+                          </ol>
+                          <button
+                            onClick={() => setFeishuSetupStep(2)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[var(--color-bili-blue)] text-white rounded-lg hover:brightness-110 transition"
+                          >
+                            {t('feishu.nextStep')}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <p className="text-sm font-medium text-slate-700">{t('feishu.setupStep2Title')}</p>
+                          <div className="space-y-2">
+                            <input
+                              type="text"
+                              value={feishuSetupAppId}
+                              onChange={e => setFeishuSetupAppId(e.target.value)}
+                              placeholder="App ID (cli_xxxxxxxxxxxx)"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[var(--color-bili-blue)]/30 focus:border-[var(--color-bili-blue)]"
+                            />
+                            <input
+                              type="password"
+                              value={feishuSetupSecret}
+                              onChange={e => setFeishuSetupSecret(e.target.value)}
+                              placeholder="App Secret"
+                              className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-[var(--color-bili-blue)]/30 focus:border-[var(--color-bili-blue)]"
+                            />
+                          </div>
+                          {feishuStatus?.stage === 'token_failed' && (
+                            <p className="text-xs text-red-500">{feishuStatus.message}</p>
+                          )}
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setFeishuSetupStep(1)}
+                              className="px-3 py-1.5 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition"
+                            >
+                              {t('feishu.prevStep')}
+                            </button>
+                            <button
+                              onClick={saveFeishuSetup}
+                              disabled={!feishuSetupAppId.trim() || !feishuSetupSecret.trim() || feishuSetupSaving}
+                              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-[var(--color-bili-blue)] text-white rounded-lg hover:brightness-110 transition disabled:opacity-50"
+                            >
+                              {feishuSetupSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle className="w-3.5 h-3.5" />}
+                              {t('feishu.saveAndVerify')}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Search input */}
+            {feishuStatus?.ok && (
+              <div className="px-4 py-2 border-b border-slate-100">
+                <input
+                  type="text"
+                  value={feishuKeyword}
+                  onChange={e => {
+                    const val = e.target.value
+                    setFeishuKeyword(val)
+                    if (feishuSearchTimer.current) clearTimeout(feishuSearchTimer.current)
+                    feishuSearchTimer.current = setTimeout(() => {
+                      fetchFeishuRecords(true, val)
+                    }, 400)
+                  }}
+                  placeholder={t('feishu.searchPlaceholder')}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-slate-50 focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none placeholder:text-slate-400"
+                />
+              </div>
+            )}
+
+            {/* Song list with scroll */}
+            <div
+              ref={feishuScrollRef}
+              onScroll={handleFeishuScroll}
+              className="max-h-[360px] overflow-y-auto"
+            >
+              {feishuLoading && feishuRecords.length === 0 ? (
+                <div className="flex items-center justify-center py-12 text-slate-400">
+                  <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                  {t('feishu.fetchingBtn')}
+                </div>
+              ) : feishuRecords.length === 0 ? (
+                <div className="flex items-center justify-center py-12 text-sm text-slate-400">
+                  {t('feishu.empty')}
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {feishuRecords.map((rec) => (
+                    <div
+                      key={rec.record_id}
+                      className="flex items-center gap-3 px-5 py-2.5 hover:bg-slate-50/80 transition group"
+                    >
+                      {/* Song info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm text-slate-800 truncate">{rec.song_name}</span>
+                        </div>
+                        <div className="flex items-center gap-3 mt-0.5 text-xs text-slate-400">
+                          <span>{rec.date ? rec.date.split(' ')[0] : ''}</span>
+                          {rec.start_time && <span>{t('feishu.startTime')}: {rec.start_time}</span>}
+                          {rec.end_time && <span>{t('feishu.endTime')}: {rec.end_time}</span>}
+                          {rec.replay_link_text && <span className="truncate max-w-[160px]" title={rec.replay_url}>{rec.replay_link_text}</span>}
+                        </div>
+                      </div>
+
+                      {/* Actions */}
+                      <div className="flex items-center gap-1.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => handleFeishuFill(rec)}
+                          className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-[var(--color-bili-blue)] text-white rounded-lg hover:brightness-110 transition"
+                          title={t('feishu.fillBtn')}
+                        >
+                          <Play className="w-3 h-3" />
+                          {t('feishu.fillBtn')}
+                        </button>
+
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Load more footer */}
+              {feishuRecords.length > 0 && (
+                <div className="flex items-center justify-center py-3 border-t border-slate-100">
+                  {feishuLoadingMore ? (
+                    <div className="flex items-center text-xs text-slate-400">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
+                      {t('feishu.loadingMore')}
+                    </div>
+                  ) : feishuHasMore ? (
+                    <button
+                      onClick={() => fetchFeishuRecords(false)}
+                      className="text-xs font-medium text-[var(--color-bili-blue)] hover:underline"
+                    >
+                      {t('feishu.loadMore')}
+                    </button>
+                  ) : (
+                    <span className="text-xs text-slate-300">{t('feishu.noMore')}</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* URL Input + Fetch */}
@@ -613,6 +1015,19 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
               />
             </div>
             <div className="text-xs text-slate-400">({fmtTimeLong(endTime - startTime)} / {fmtTimeLong(videoInfo.duration)})</div>
+            {activeFeishuRecord && (
+              <button
+                onClick={() => handleFeishuWriteback(activeFeishuRecord)}
+                disabled={feishuWritingBack === activeFeishuRecord.record_id}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-amber-50 border border-amber-300 text-amber-700 rounded-lg hover:bg-amber-100 transition disabled:opacity-50"
+                title={t('feishu.writebackBtn')}
+              >
+                {feishuWritingBack === activeFeishuRecord.record_id
+                  ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  : <Upload className="w-3.5 h-3.5" />}
+                {t('feishu.writebackBtn')} ({activeFeishuRecord.song_name})
+              </button>
+            )}
           </div>
 
           {/* Range sliders */}
@@ -723,13 +1138,13 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
               className="flex items-center gap-2 px-6 py-3 bg-[var(--color-bili-pink)] text-white font-medium rounded-xl hover:brightness-110 transition disabled:opacity-50 shadow-sm"
             >
               {clipLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Scissors className="w-5 h-5" />}
-              Add to Clip Tasks
+              {t('clipTask.addToTasks')}
             </button>
           </div>
 
           {clipTasks && clipTasks.filter(t => t.url === url).length > 0 && (
             <div className="space-y-2 mt-2 max-w-xl">
-              <div className="text-sm font-semibold text-slate-700 mb-2">Tasks for this video</div>
+              <div className="text-sm font-semibold text-slate-700 mb-2">{t('clipTask.tasksForVideo')}</div>
               {clipTasks.filter(t => t.url === url).map(task => (
                 <div key={task.id} className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm flex flex-col gap-2">
                   <div className="flex justify-between items-center">
@@ -739,12 +1154,34 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                     </span>
                   </div>
                   {(task.status === 'processing' || task.status === 'pending') && (
-                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                      <div className="bg-[var(--color-bili-blue)] h-1.5 rounded-full transition-all duration-300" style={{ width: `${task.progress}%` }} />
-                    </div>
+                    <>
+                      <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                        <div className="bg-[var(--color-bili-blue)] h-1.5 rounded-full transition-all duration-300" style={{ width: `${task.progress}%` }} />
+                      </div>
+                      {task.message && <div className="text-xs text-slate-500 mt-0.5">{task.message}</div>}
+                    </>
                   )}
                   {task.status === 'error' && <div className="text-xs text-red-500 truncate" title={task.message}>{task.message}</div>}
-                  {task.status === 'done' && <div className="text-xs text-green-600 truncate" title={task.file_path}>{task.file_path}</div>}
+                  {task.status === 'done' && task.message && <div className="text-xs text-green-600 mt-0.5">{task.message}</div>}
+                  {task.status === 'done' && (
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className="text-xs text-green-600 truncate flex-1" title={task.file_path}>{task.file_path}</span>
+                      <button
+                        onClick={() => apiClient.post('/api/clip/open-file', { filePath: task.file_path })}
+                        className="text-xs text-[var(--color-bili-blue)] hover:underline flex-shrink-0"
+                        title={t('clipTask.openFile')}
+                      >
+                        {t('clipTask.openFile')}
+                      </button>
+                      <button
+                        onClick={() => apiClient.post('/api/clip/open-folder', { filePath: task.file_path })}
+                        className="text-xs text-[var(--color-bili-blue)] hover:underline flex-shrink-0"
+                        title={t('clipTask.openFolder')}
+                      >
+                        {t('clipTask.openFolder')}
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -761,13 +1198,13 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 overflow-hidden app-scale-in">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center gap-3">
               <Scissors className="w-5 h-5 text-[var(--color-bili-pink)]" />
-              <div className="font-bold text-lg">Clip Settings</div>
+              <div className="font-bold text-lg">{t('clipTask.clipSettings')}</div>
             </div>
             <div className="p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1.5">
                   <Edit3 className="w-3.5 h-3.5 inline mr-1" />
-                  File Name
+                  {t('clipTask.fileName')}
                 </label>
                 <input
                   value={clipTitle}
@@ -783,19 +1220,71 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                 <div><span className="font-medium text-slate-700">End:</span> {formatTimeInput(endTime)}</div>
                 <div><span className="font-medium text-slate-700">Duration:</span> {formatTimeInput(endTime - startTime)}</div>
               </div>
-              {clipOutputDir && (
-                <div className="flex items-center gap-2 text-xs text-slate-500">
-                  <FolderOpen className="w-3.5 h-3.5" />
-                  <span className="truncate">{clipOutputDir}</span>
+              <div className="flex items-center gap-2 text-xs text-slate-500 bg-slate-50 rounded-xl p-3">
+                <span className="font-medium text-slate-700">{t('clipTask.preview')}:</span>
+                <span className="text-slate-600">
+                  {clipPrefixCut ? '[cut] ' : ''}{clipTitle}{clipSuffixTime ? ` (${formatTimeInput(startTime)}-${formatTimeInput(endTime)})` : ''}.mp4
+                </span>
+              </div>
+              <div className="flex items-center gap-6">
+                <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={clipPrefixCut}
+                    onChange={e => setClipPrefixCut(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-[var(--color-bili-pink)] focus:ring-[var(--color-bili-pink)]"
+                  />
+                  {t('clipTask.prefixCut')}
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={clipSuffixTime}
+                    onChange={e => setClipSuffixTime(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-300 text-[var(--color-bili-pink)] focus:ring-[var(--color-bili-pink)]"
+                  />
+                  {t('clipTask.suffixTime')}
+                </label>
+              </div>
+              {/* Clip Mode Selector */}
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">{t('clipTask.clipMode')}</label>
+                <div className="space-y-2">
+                  {[
+                    { value: 'copy' as const, label: t('clipTask.modeCopy'), desc: t('clipTask.modeCopyDesc') },
+                    { value: 'reencode' as const, label: t('clipTask.modeReencode'), desc: t('clipTask.modeReencodeDesc') },
+                  ].map(opt => (
+                    <label
+                      key={opt.value}
+                      className={`flex items-start gap-3 p-3 rounded-xl cursor-pointer border transition ${
+                        clipMode === opt.value
+                          ? 'border-[var(--color-bili-pink)] bg-pink-50/50'
+                          : 'border-slate-200 hover:border-slate-300 bg-white'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="clipMode"
+                        value={opt.value}
+                        checked={clipMode === opt.value}
+                        onChange={() => setClipMode(opt.value)}
+                        className="mt-0.5 w-4 h-4 text-[var(--color-bili-pink)] focus:ring-[var(--color-bili-pink)]"
+                      />
+                      <div>
+                        <div className="text-sm font-medium text-slate-800">{opt.label}</div>
+                        <div className="text-xs text-slate-500 mt-0.5">{opt.desc}</div>
+                      </div>
+                    </label>
+                  ))}
                 </div>
-              )}
+              </div>
             </div>
             <div className="px-6 py-4 border-t border-slate-200 flex justify-end gap-3 bg-slate-50">
               <button
                 onClick={() => setShowClipDialog(false)}
                 className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition"
               >
-                Cancel
+                {t('clipTask.cancel')}
               </button>
               <button
                 onClick={executeClip}
@@ -803,7 +1292,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                 className="flex items-center gap-2 px-5 py-2 text-sm font-medium text-white bg-[var(--color-bili-pink)] rounded-lg hover:brightness-110 transition disabled:opacity-50"
               >
                 {clipLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Scissors className="w-4 h-4" />}
-                Confirm
+                {t('clipTask.confirm')}
               </button>
             </div>
           </div>

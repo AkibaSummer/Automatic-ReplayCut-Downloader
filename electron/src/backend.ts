@@ -28,6 +28,7 @@ import { SqliteStore } from './db'
 import { BilibiliClient, USER_AGENT } from './bilibili'
 import { DownloaderService } from './downloader'
 import { ClipService } from './clip'
+import { FeishuClient } from './feishu'
 
 class DesktopBackend {
   private readonly baseDir: string
@@ -37,6 +38,7 @@ class DesktopBackend {
   private readonly bilibiliClient: BilibiliClient
   private readonly downloaderService: DownloaderService
   private readonly clipService: ClipService
+  private readonly feishuClient: FeishuClient
 
   private readonly app = express()
   private readonly server = http.createServer(this.app)
@@ -65,6 +67,7 @@ class DesktopBackend {
     this.bilibiliClient = new BilibiliClient(config, db, customFetch)
     this.downloaderService = new DownloaderService(config, db, this.bilibiliClient, (p) => this.emitProgress(p))
     this.clipService = new ClipService(config, this.bilibiliClient, baseDir)
+    this.feishuClient = new FeishuClient(config.feishu)
 
     ensureDir(this.config.download.output_dir)
     ensureDir(this.config.download.temp_dir)
@@ -512,7 +515,7 @@ class DesktopBackend {
 
     this.app.post('/api/clip/execute', async (req, res) => {
       try {
-        const { url, title, startTime, endTime, audioQualityIndex, videoQualityIndex } = req.body
+        const { url, title, startTime, endTime, audioQualityIndex, videoQualityIndex, prefixCut, suffixTime, clipMode } = req.body
         const taskId = this.db.createClipTask({
           url,
           title: title || 'Clip',
@@ -525,18 +528,117 @@ class DesktopBackend {
         // Execute in background
         this.clipService.executeClip(
           url, title, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
-          (progress) => {
-            this.db.updateClipTask(taskId, { progress, status: 'processing' })
+          (progress, message) => {
+            this.db.updateClipTask(taskId, { progress, status: 'processing', message: message || '' })
             this.emitClipTaskUpdate(taskId)
-          }
+          },
+          prefixCut !== false,
+          suffixTime !== false,
+          clipMode || 'smart',
         ).then(result => {
-          this.db.updateClipTask(taskId, { progress: 100, status: 'done', file_path: (result as { path: string }).path })
+          const r = result as { path: string; message?: string }
+          this.db.updateClipTask(taskId, { progress: 100, status: 'done', file_path: r.path, message: r.message || '' })
           this.emitClipTaskUpdate(taskId)
         }).catch(error => {
           this.db.updateClipTask(taskId, { status: 'error', message: error.message })
           this.emitClipTaskUpdate(taskId)
         })
 
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    // Open a file with system default app
+    this.app.post('/api/clip/open-file', async (req, res) => {
+      try {
+        const { filePath } = req.body
+        if (!filePath || !fs.existsSync(filePath)) {
+          res.status(404).json({ ok: false, message: 'File not found' })
+          return
+        }
+        const { exec } = await import('node:child_process')
+        exec(`start "" "${filePath}"`)
+        res.json({ ok: true })
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    // Open file's parent folder in explorer with the file selected
+    this.app.post('/api/clip/open-folder', async (req, res) => {
+      try {
+        const { filePath } = req.body
+        if (!filePath) {
+          res.status(400).json({ ok: false, message: 'filePath is required' })
+          return
+        }
+        const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
+        const { exec } = await import('node:child_process')
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          exec(`explorer /select,"${filePath}"`)
+        } else {
+          exec(`explorer "${dir}"`)
+        }
+        res.json({ ok: true })
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    // --- 飞书多维表格 API ---
+    this.app.get('/api/feishu/status', async (_req, res) => {
+      try {
+        const status = await this.feishuClient.checkStatus()
+        res.json(status)
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    this.app.post('/api/feishu/config', async (req, res) => {
+      try {
+        const { app_id, app_secret } = req.body
+        if (!app_id || !app_secret) {
+          res.status(400).json({ error: 'Missing app_id or app_secret' })
+          return
+        }
+        // Update config and save
+        this.config.feishu.app_id = app_id
+        this.config.feishu.app_secret = app_secret
+        await saveConfigFile(this.baseDir, this.configPath, this.config)
+        // Reinitialize the client with new credentials
+        ;(this as any).feishuClient = new FeishuClient(this.config.feishu)
+        // Verify the new config works
+        const status = await this.feishuClient.checkStatus()
+        res.json(status)
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    this.app.get('/api/feishu/records', async (req, res) => {
+      try {
+        const pageToken = (req.query.page_token as string) || undefined
+        const limit = Math.min(Number(req.query.limit) || 20, 200)
+        const keyword = (req.query.keyword as string) || undefined
+        const result = await this.feishuClient.listClippableRecords(pageToken, limit, keyword)
+        res.json(result)
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    this.app.put('/api/feishu/records/:recordId', async (req, res) => {
+      try {
+        const { recordId } = req.params
+        const { fields } = req.body
+        if (!recordId || !fields || typeof fields !== 'object') {
+          res.status(400).json({ error: 'Missing recordId or fields' })
+          return
+        }
+        await this.feishuClient.updateRecord(recordId, fields)
+        res.json({ ok: true })
       } catch (error) {
         this.sendError(res, error)
       }
