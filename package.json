@@ -8,15 +8,17 @@
   "scripts": {
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "npm --prefix frontend run dev -- --host 127.0.0.1 --port 5173",
-    "dev:electron": "wait-on tcp:5173 && tsx electron/src/main.ts",
+    "dev:electron": "wait-on tcp:5173 && electron -r tsx electron/src/main.ts",
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "npm --prefix frontend run build",
     "build:electron": "tsc -p electron/tsconfig.json",
-    "dist": "npm run build && electron-builder --win portable",
+    "dist": "npm run build && electron-builder --win dir",
     "start": "electron ."
   },
   "dependencies": {
     "express": "^4.21.2",
+    "ffmpeg-static": "^5.3.0",
+    "fluent-ffmpeg": "^2.1.3",
     "mp4-muxer": "^5.2.2",
     "music-metadata": "^11.12.3",
     "sql.js": "^1.13.0",
@@ -25,6 +27,7 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.3",
+    "@types/fluent-ffmpeg": "^2.1.28",
     "@types/node": "^24.3.0",
     "@types/sql.js": "^1.4.9",
     "@types/ws": "^8.18.1",
@@ -42,16 +45,33 @@
       "output": "release\\electron"
     },
     "asar": true,
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**/*",
+      "node_modules/sql.js/dist/sql-wasm.wasm"
+    ],
+    "electronLanguages": ["zh-CN", "en-US"],
     "files": [
       "electron-dist/**/*",
       "frontend/dist/**/*",
-      "package.json"
+      "package.json",
+      "!**/{test,tests,__tests__,spec,example,examples}/**",
+      "!**/*.{md,map,d.ts}",
+      "!**/CHANGELOG*",
+      "!**/LICENSE*",
+      "!**/README*",
+      "node_modules/sql.js/dist/sql-wasm.js",
+      "node_modules/sql.js/dist/sql-wasm.wasm",
+      "!node_modules/sql.js/dist/sql-asm*",
+      "!node_modules/sql.js/dist/sql-wasm-debug*",
+      "!node_modules/sql.js/dist/sql-wasm-browser*",
+      "!node_modules/sql.js/dist/worker*",
+      "!node_modules/music-metadata/test/**"
     ],
     "win": {
       "target": [
-        "portable"
-      ],
-      "artifactName": "ReplayManager-Portable.exe"
-    }
+        "dir"
+      ]
+    },
+    "afterPack": "scripts/afterPack.js"
   }
 }

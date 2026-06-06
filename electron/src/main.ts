@@ -1,8 +1,16 @@
 import path from 'node:path'
 
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 
 import { startDesktopBackend } from './backend'
+
+// Prevent crashes from uncaught errors
+process.on('uncaughtException', (err) => {
+  console.error('[main] Uncaught exception:', err)
+})
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] Unhandled rejection:', reason)
+})
 
 let mainWindow: BrowserWindow | null = null
 let backendStop: (() => Promise<void>) | null = null
@@ -20,7 +28,9 @@ async function createMainWindow() {
     autoHideMenuBar: true,
     backgroundColor: '#f1f5f9',
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: isDev
+        ? path.join(__dirname, '..', '..', 'electron-dist', 'preload.js')
+        : path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
@@ -52,6 +62,16 @@ async function boot() {
   ipcMain.handle('desktop:get-backend-base-url', () => backendBaseURL)
   ipcMain.handle('desktop:quit-app', () => {
     app.quit()
+  })
+  ipcMain.handle('desktop:pick-folder', async (_event, defaultPath?: string) => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory', 'createDirectory'],
+      defaultPath: defaultPath || undefined,
+      title: 'Select Output Folder',
+    })
+    if (result.canceled || result.filePaths.length === 0) return null
+    return result.filePaths[0]
   })
 
   await createMainWindow()

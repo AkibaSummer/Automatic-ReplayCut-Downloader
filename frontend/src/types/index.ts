@@ -106,4 +106,19 @@ export interface ClipPageProps {
   apiBase: string
   showToast: (toast: { tone: ToastTone; title: string; message?: string; durationMs?: number }) => void
   t: (key: string, options?: any) => string
+  clipTasks: ClipTaskRecord[]
+}
+
+export type ClipTaskRecord = {
+  id: number
+  created_at: string
+  updated_at: string
+  url: string
+  title: string
+  start_time: number
+  end_time: number
+  file_path: string
+  progress: number
+  status: 'pending' | 'processing' | 'done' | 'error'
+  message: string
 }

@@ -102,3 +102,17 @@ export type M3U8Segment = {
   url: string
   duration: number
 }
+
+export type ClipTaskRecord = {
+  id: number
+  created_at: string
+  updated_at: string
+  url: string
+  title: string
+  start_time: number
+  end_time: number
+  file_path: string
+  progress: number
+  status: 'pending' | 'processing' | 'done' | 'error'
+  message: string
+}

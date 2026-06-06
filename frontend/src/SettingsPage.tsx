@@ -1,5 +1,5 @@
 import type { AxiosInstance } from 'axios'
-import { RefreshCcw, Settings } from 'lucide-react'
+import { FolderOpen, RefreshCcw, Settings } from 'lucide-react'
 import type { Config } from './types'
 
 export interface SettingsPageProps {
@@ -25,6 +25,12 @@ export function SettingsPage({
   openDirModal,
   t,
 }: SettingsPageProps) {
+
+  const pickDir = async (currentPath: string, onPicked: (p: string) => void) => {
+    const picked = await window.desktopAPI?.pickFolder?.(currentPath)
+    if (picked) onPicked(picked)
+  }
+
   return (
     <div className="max-w-5xl mx-auto">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
@@ -79,10 +85,11 @@ export function SettingsPage({
                 />
                 <button
                   type="button"
-                  onClick={openDirModal}
+                  onClick={() => pickDir(config.download.output_dir || '', p => setConfig({ ...config, download: { ...config.download, output_dir: p } }))}
                   disabled={!backendOnline}
-                  className="px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
+                  className="px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50 flex items-center gap-1.5"
                 >
+                  <FolderOpen className="w-4 h-4" />
                   {t('common.browse')}
                 </button>
               </div>
@@ -90,13 +97,23 @@ export function SettingsPage({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Clip Output Dir</label>
-              <input
-                value={config.download.clip_output_dir || ''}
-                onChange={e => setConfig({ ...config, download: { ...config.download, clip_output_dir: e.target.value } })}
-                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-bili-pink)] focus:border-transparent outline-none transition"
-              />
-              <div className="text-xs text-slate-500 mt-1">Output directory for clipped audio files</div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">{t('common.saveTo')} (Clip)</label>
+              <div className="flex gap-2">
+                <input
+                  value={config.download.clip_output_dir || ''}
+                  onChange={e => setConfig({ ...config, download: { ...config.download, clip_output_dir: e.target.value } })}
+                  className="flex-1 px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-bili-pink)] focus:border-transparent outline-none transition"
+                />
+                <button
+                  type="button"
+                  onClick={() => pickDir(config.download.clip_output_dir || '', p => setConfig({ ...config, download: { ...config.download, clip_output_dir: p } }))}
+                  disabled={!backendOnline}
+                  className="px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50 flex items-center gap-1.5"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  {t('common.browse')}
+                </button>
+              </div>
             </div>
 
             <div className="md:col-span-2">

@@ -55,6 +55,34 @@ textarea {
   }
 }
 
+.app-scale-in {
+  animation: app-scale-in 200ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes app-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.app-slide-in {
+  animation: app-slide-in 250ms ease-out;
+}
+
+@keyframes app-slide-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

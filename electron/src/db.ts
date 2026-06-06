@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import initSqlJs, { type BindParams, type Database as SqlDatabase } from 'sql.js'
-import { ReplayRecord, StreamSlice } from './types'
+import { ReplayRecord, StreamSlice, ClipTaskRecord } from './types'
 import { safeNumber, boolFromDb } from './utils'
 import { resolveAppPathWithBase } from './config'
 import path from 'node:path'
@@ -59,7 +59,7 @@ export class SqliteStore {
 
   static async open(filePath: string) {
     const SQL = await initSqlJs({
-      locateFile: file => require.resolve(`sql.js/dist/${file}`),
+      locateFile: file => require.resolve(`sql.js/dist/${file}`).replace('app.asar', 'app.asar.unpacked'),
     })
     const db = fs.existsSync(filePath)
       ? new SQL.Database(fs.readFileSync(filePath))
@@ -209,6 +209,19 @@ export class SqliteStore {
         type INTEGER DEFAULT 0,
         m3_u8_text TEXT DEFAULT ''
       );
+      CREATE TABLE IF NOT EXISTS clip_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT,
+        updated_at TEXT,
+        url TEXT DEFAULT '',
+        title TEXT DEFAULT '',
+        start_time REAL DEFAULT 0,
+        end_time REAL DEFAULT 0,
+        file_path TEXT DEFAULT '',
+        progress REAL DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        message TEXT DEFAULT ''
+      );
     `)
   }
 
@@ -338,4 +351,49 @@ export class SqliteStore {
     )
     return true
   }
+
+  // --- Clip Tasks ---
+  createClipTask(task: Omit<ClipTaskRecord, 'id' | 'created_at' | 'updated_at' | 'progress' | 'status' | 'message' | 'file_path'>): number {
+    const now = new Date().toISOString()
+    this.prepare(
+      `INSERT INTO clip_tasks (created_at, updated_at, url, title, start_time, end_time, status, progress) 
+       VALUES (?, ?, ?, ?, ?, ?, 'pending', 0)`
+    ).run(now, now, task.url, task.title, task.start_time, task.end_time)
+    
+    const lastInsert = this.get<{ id: number }>('SELECT last_insert_rowid() AS id')
+    return lastInsert?.id || 0
+  }
+
+  updateClipTask(id: number, patch: Partial<Pick<ClipTaskRecord, 'status' | 'progress' | 'message' | 'file_path'>>) {
+    const updates: string[] = []
+    const params: unknown[] = []
+    for (const [k, v] of Object.entries(patch)) {
+      updates.push(`${k} = ?`)
+      params.push(v)
+    }
+    if (updates.length === 0) return
+    updates.push('updated_at = ?')
+    params.push(new Date().toISOString())
+    params.push(id)
+    
+    this.prepare(`UPDATE clip_tasks SET ${updates.join(', ')} WHERE id = ?`).run(...params)
+  }
+
+  getClipTasks(): ClipTaskRecord[] {
+    const rows = this.prepare('SELECT * FROM clip_tasks ORDER BY created_at DESC').all() as Record<string, unknown>[]
+    return rows.map(r => ({
+      id: safeNumber(r.id),
+      created_at: String(r.created_at || ''),
+      updated_at: String(r.updated_at || ''),
+      url: String(r.url || ''),
+      title: String(r.title || ''),
+      start_time: safeNumber(r.start_time),
+      end_time: safeNumber(r.end_time),
+      file_path: String(r.file_path || ''),
+      status: String(r.status || 'pending') as ClipTaskRecord['status'],
+      progress: safeNumber(r.progress),
+      message: String(r.message || '')
+    }))
+  }
 }
+

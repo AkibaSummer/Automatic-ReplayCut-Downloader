@@ -35,6 +35,7 @@ import type {
   FsListResponse,
   Toast,
   ToastTone,
+  ClipTaskRecord,
 } from './types'
 import {
   getErrorMessage,
@@ -84,6 +85,8 @@ function App() {
   const [paused, setPaused] = useState(false)
   const [runtimeState, setRuntimeState] = useState<Runtime | null>(null)
   const [progressMap, setProgressMap] = useState<Record<string, Progress>>({})
+  const [clipTasks, setClipTasks] = useState<ClipTaskRecord[]>([])
+  const [showTaskCenter, setShowTaskCenter] = useState(false)
   const [selectedLiveKey, setSelectedLiveKey] = useState<string | null>(null)
   const [m3u8Open, setM3u8Open] = useState(false)
   const [isScanning, setIsScanning] = useState(false)
@@ -254,6 +257,7 @@ function App() {
     fetchConfig()
     fetchMe()
     fetchRuntime()
+    fetchClipTasks()
     pingHealth()
     const healthTimer = setInterval(pingHealth, 30000)
 
@@ -262,7 +266,31 @@ function App() {
     ws.onerror = () => setWsOnline(false)
     ws.onclose = () => setWsOnline(false)
     ws.onmessage = (event) => {
-      const data: Progress = JSON.parse(event.data)
+      const raw = JSON.parse(event.data)
+      
+      if (raw.type === 'clip_task_update') {
+        const task = raw.data as ClipTaskRecord
+        setClipTasks(prev => {
+          const exists = prev.some(t => t.id === task.id)
+          if (exists) return prev.map(t => t.id === task.id ? task : t)
+          return [task, ...prev]
+        })
+        if (task.status === 'done') {
+          showToast({ tone: 'success', title: 'Clip task completed', message: task.title })
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('Clip Completed', { body: task.title })
+          } else if ('Notification' in window && Notification.permission !== 'denied') {
+            Notification.requestPermission().then(p => {
+              if (p === 'granted') new Notification('Clip Completed', { body: task.title })
+            })
+          }
+        } else if (task.status === 'error') {
+          showToast({ tone: 'error', title: 'Clip task failed', message: task.message })
+        }
+        return
+      }
+
+      const data: Progress = raw
       setProgressMap(prev => {
         const prevItem = prev[data.live_key]
         let next = data
@@ -430,6 +458,15 @@ function App() {
       setBackendOnline(true)
     } catch (e) {
       setBackendOnline(false)
+    }
+  }
+
+  const fetchClipTasks = async () => {
+    try {
+      const res = await apiClient.get('/api/clip/tasks')
+      setClipTasks(res.data as ClipTaskRecord[])
+    } catch (e) {
+      console.error('Failed to fetch clip tasks', e)
     }
   }
 
@@ -778,11 +815,9 @@ function App() {
 
   const runtimePills = useMemo(() => {
     const pills: JSX.Element[] = []
-    pills.push(<StatusPill key="backend" label={backendOnline ? t('dashboard.backendOnline') : t('dashboard.backendOffline')} tone={backendOnline ? 'good' : 'bad'} />)
-    pills.push(<StatusPill key="ws" label={wsOnline ? 'WS Live' : 'WS Polling'} tone={wsOnline ? 'good' : 'neutral'} />)
     if (paused) pills.push(<StatusPill key="paused" label={t('common.paused')} tone="neutral" />)
     return pills
-  }, [backendOnline, paused, t, wsOnline])
+  }, [paused, t])
 
   const runtimeCards = [
     { label: t('dashboard.concurrencyLimit'), value: runtimeSnapshot.maxConcurrentTasks, tone: 'text-[var(--color-bili-blue)]' },
@@ -864,6 +899,19 @@ function App() {
             >
               <Scissors className="w-5 h-5 mr-3" />
               {t('common.clip')}
+            </button>
+            <button
+              onClick={() => { setShowTaskCenter(true); setSidebarOpen(false) }}
+              className={`w-full flex items-center px-3 py-2 text-sm font-medium rounded-md ${showTaskCenter ? 'bg-stone-100 text-[var(--color-bili-blue)]' : 'text-slate-700 hover:bg-slate-50'}`}
+            >
+              <Download className="w-5 h-5 mr-3" />
+              Clip Task Center
+              {clipTasks.filter(t => t.status === 'processing' || t.status === 'pending').length > 0 && (
+                <span className="ml-auto flex h-2 w-2 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-bili-pink)] opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-bili-pink)]"></span>
+                </span>
+              )}
             </button>
 
             <div className="pt-4">
@@ -1280,13 +1328,15 @@ function App() {
               />
             )}
 
-            {page === 'clip' && <ClipPage apiClient={apiClient} apiBase={apiBase} showToast={showToast} t={t} />}
+            <div style={{ display: page === 'clip' ? undefined : 'none' }}>
+              <ClipPage apiClient={apiClient} apiBase={apiBase} showToast={showToast} t={t} clipTasks={clipTasks} />
+            </div>
           </div>
         </main>
       </div>
 
       {selectedReplay && (
-        <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 z-50 app-fade-in">
+        <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 z-50 app-fade-in" onClick={e => { if (e.target === e.currentTarget) setSelectedLiveKey(null) }}>
           <div className="bg-white rounded-2xl shadow-2xl max-w-5xl w-full max-h-[88vh] overflow-hidden border border-white/70">
             <div className="p-4 sm:p-6 border-b flex justify-between items-center">
               <h3 className="text-xl font-bold text-gray-900">{t('dashboard.detailsTitle')}</h3>
@@ -1408,7 +1458,7 @@ function App() {
       )}
 
       {dirModalOpen && (
-        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50" onClick={e => { if (e.target === e.currentTarget) setDirModalOpen(false) }}>
           <div className="bg-white rounded-2xl shadow-xl border border-slate-200 w-full max-w-2xl overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <div className="font-semibold">{t('dashboard.chooseDir')}</div>
@@ -1465,6 +1515,64 @@ function App() {
         </div>
       )}
     {showLoginModal && <LoginModal apiClient={apiClient} onClose={() => setShowLoginModal(false)} onSuccess={() => { setShowLoginModal(false); fetchMe(); }} />}
+    
+    {showTaskCenter && (
+        <div className="fixed inset-0 bg-black/40 flex justify-end z-[90]" onClick={e => { if (e.target === e.currentTarget) setShowTaskCenter(false) }}>
+          <div className="bg-white w-full max-w-md h-full flex flex-col shadow-2xl app-slide-in">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <div className="font-bold text-lg">Clip Task Center</div>
+              <button className="p-2 rounded hover:bg-slate-100" onClick={() => setShowTaskCenter(false)}>
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+              {clipTasks.length === 0 ? (
+                <div className="text-center text-slate-400 mt-10">No clip tasks yet</div>
+              ) : clipTasks.map(task => (
+                <div key={task.id} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="font-medium text-slate-900 truncate pr-2">{task.title}</div>
+                    <StatusPill 
+                      label={task.status.toUpperCase()} 
+                      tone={task.status === 'done' ? 'good' : task.status === 'error' ? 'bad' : 'neutral'} 
+                    />
+                  </div>
+                  <div className="text-xs text-slate-500 mb-3">
+                    {new Date(task.created_at).toLocaleString()}
+                  </div>
+                  
+                  {(task.status === 'processing' || task.status === 'pending') && (
+                    <div>
+                      <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                        <div
+                          className="bg-[var(--color-bili-blue)] h-1.5 rounded-full transition-all duration-300"
+                          style={{ width: `${task.progress}%` }}
+                        />
+                      </div>
+                      <div className="mt-1 flex justify-between text-[11px] text-slate-500">
+                        <span>Clipping...</span>
+                        <span>{Math.round(task.progress)}%</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {task.status === 'done' && (
+                    <div className="mt-2 text-xs text-green-600 bg-green-50 p-2 rounded truncate" title={task.file_path}>
+                      {task.file_path}
+                    </div>
+                  )}
+
+                  {task.status === 'error' && (
+                    <div className="mt-2 text-xs text-red-600 bg-red-50 p-2 rounded">
+                      {task.message}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       </div>
   )
 }

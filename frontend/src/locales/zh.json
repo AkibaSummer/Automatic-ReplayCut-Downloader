@@ -45,7 +45,8 @@
     "loginExpired": "二维码已过期，请刷新",
     "loginFailed": "登录失败:",
     "loginRefresh": "刷新二维码",
-    "clip": "视频切片"
+    "clip": "视频切片",
+    "saveTo": "保存至"
   },
   "dashboard": {
     "downloadsTitle": "下载",

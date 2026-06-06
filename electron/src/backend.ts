@@ -21,6 +21,7 @@ import {
   saveConfigFile,
   normalizeConfigWithBase,
   detectBaseDir,
+  resolveAppPathWithBase,
 } from './config'
 import { safeNumber, ensureDir } from './utils'
 import { SqliteStore } from './db'
@@ -55,13 +56,13 @@ class DesktopBackend {
     path: string; total_bytes: number; free_bytes: number; used_by_service_bytes: number
   }> | null = null
 
-  private constructor(baseDir: string, config: AppConfig, db: SqliteStore) {
+  private constructor(baseDir: string, config: AppConfig, db: SqliteStore, customFetch?: typeof globalThis.fetch) {
     this.baseDir = baseDir
     this.configPath = path.join(baseDir, 'config.yaml')
     this.config = config
     this.db = db
 
-    this.bilibiliClient = new BilibiliClient(config, db)
+    this.bilibiliClient = new BilibiliClient(config, db, customFetch)
     this.downloaderService = new DownloaderService(config, db, this.bilibiliClient, (p) => this.emitProgress(p))
     this.clipService = new ClipService(config, this.bilibiliClient, baseDir)
 
@@ -94,17 +95,17 @@ class DesktopBackend {
     })
   }
 
-  static async create(baseDir: string) {
+  static async create(baseDir: string, customFetch?: typeof globalThis.fetch) {
     const configPath = path.join(baseDir, 'config.yaml')
     const config = loadConfigFile(baseDir, configPath)
     const db = await SqliteStore.open(config.database.dsn)
-    return new DesktopBackend(baseDir, config, db)
+    return new DesktopBackend(baseDir, config, db, customFetch)
   }
 
   async listen() {
     this.db.cleanupCorruptedReplays()
     await new Promise<void>(resolve => {
-      this.server.listen(0, '127.0.0.1', () => resolve())
+      this.server.listen(this.config.server.port, '127.0.0.1', () => resolve())
     })
     this.recoverInterruptedTasks()
     const addr = this.server.address()
@@ -399,11 +400,47 @@ class DesktopBackend {
     })
 
     // --- 视频切片 API ---
+    // Cover image proxy — fetches external B站 cover images to avoid mixed-content blocks
+    this.app.get('/api/clip/cover-proxy', async (req, res) => {
+      try {
+        const url = req.query.url as string
+        if (!url) throw new Error('Missing cover URL')
+        const response = await this.bilibiliClient.fetchWithCookies(url)
+        const contentType = response.headers.get('content-type') || 'image/jpeg'
+        res.setHeader('content-type', contentType)
+        res.setHeader('cache-control', 'public, max-age=86400')
+        const buffer = Buffer.from(await response.arrayBuffer())
+        res.send(buffer)
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
+    // Clip output directory config
+    this.app.get('/api/clip/output-dir', (req, res) => {
+      const clipDir = resolveAppPathWithBase(this.baseDir, this.config.download.clip_output_dir || path.join(this.config.download.output_dir, 'clips'))
+      res.json({ path: clipDir })
+    })
+
+    this.app.post('/api/clip/output-dir', (req, res) => {
+      try {
+        const newDir = req.body.path as string
+        if (!newDir) throw new Error('Missing path')
+        this.config.download.clip_output_dir = newDir
+        ensureDir(resolveAppPathWithBase(this.baseDir, newDir))
+        res.json({ ok: true, path: resolveAppPathWithBase(this.baseDir, newDir) })
+      } catch (error) {
+        this.sendError(res, error)
+      }
+    })
+
     this.app.post('/api/clip/info', async (req, res) => {
       try {
         const info = await this.bilibiliClient.getBilibiliVideoInfo(req.body.url || '')
         const audioProxyPath = `/api/clip/audio-proxy?url=${encodeURIComponent(info.audioUrl)}`
-        res.json({ ...info, audioProxyPath })
+        // Proxy the cover image through our backend to avoid mixed-content blocks
+        const coverProxy = info.cover ? `/api/clip/cover-proxy?url=${encodeURIComponent(info.cover)}` : ''
+        res.json({ ...info, cover: coverProxy, audioProxyPath })
       } catch (error) {
         this.sendError(res, error)
       }
@@ -412,7 +449,50 @@ class DesktopBackend {
     this.app.get('/api/clip/audio-proxy', async (req, res) => {
       try {
         const url = req.query.url as string
+        const start = Number(req.query.start) || 0
+        const duration = Number(req.query.duration) || 0
         if (!url) throw new Error('Missing audio URL')
+        
+        if (duration > 0) {
+          res.setHeader('content-type', 'audio/mpeg')
+          // Use child_process.spawn directly because fluent-ffmpeg doesn't properly quote -headers
+          const cookie = this.bilibiliClient.cookieHeader()
+          const headers = `Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nCookie: ${cookie}\r\n`
+          const ffmpegPath = (require('ffmpeg-static') || '').replace('app.asar', 'app.asar.unpacked')
+          const { spawn } = require('node:child_process')
+          const args = [
+            '-ss', `${start}`,
+            '-headers', headers,
+            '-i', url,
+            '-t', `${duration}`,
+            '-f', 'mp3',
+            '-c:a', 'libmp3lame',
+            '-b:a', '32k',
+            '-ar', '8000',
+            '-ac', '1',
+            'pipe:1'
+          ]
+          console.log('[audio-proxy] spawning ffmpeg')
+          const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+          proc.stdout.pipe(res)
+          proc.stderr.on('data', (d: Buffer) => {
+            const msg = d.toString()
+            if (msg.includes('Error') || msg.includes('error')) console.error('[audio-proxy] ffmpeg stderr:', msg)
+          })
+          proc.on('error', (err: Error) => {
+            console.error('[audio-proxy] spawn error:', err)
+            if (!res.headersSent) res.status(500).json({ error: err.message })
+          })
+          proc.on('close', (code: number) => {
+            if (code !== 0) console.error('[audio-proxy] ffmpeg exited with code', code)
+            res.end()
+          })
+          return
+        }
+
+        // For non-duration requests, use ffmpeg to stream directly too
+        const cookie = this.bilibiliClient.cookieHeader()
+        const headers = `Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nCookie: ${cookie}\r\n`
         const response = await this.bilibiliClient.fetchWithCookies(url)
         res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
         res.setHeader('content-length', response.headers.get('content-length') || '')
@@ -424,15 +504,53 @@ class DesktopBackend {
       }
     })
 
+    this.app.get('/api/clip/tasks', (req, res) => {
+      res.json(this.db.getClipTasks())
+    })
+
     this.app.post('/api/clip/execute', async (req, res) => {
       try {
-        const { url, startTime, endTime, qualityIndex } = req.body
-        const result = await this.clipService.executeClip(url, Number(startTime) || 0, Number(endTime) || 0, Number(qualityIndex) || 0)
-        res.json(result)
+        const { url, title, startTime, endTime, audioQualityIndex, videoQualityIndex } = req.body
+        const taskId = this.db.createClipTask({
+          url,
+          title: title || 'Clip',
+          start_time: Number(startTime) || 0,
+          end_time: Number(endTime) || 0
+        })
+
+        res.json({ taskId, status: 'pending' })
+
+        // Execute in background
+        this.clipService.executeClip(
+          url, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
+          (progress) => {
+            this.db.updateClipTask(taskId, { progress, status: 'processing' })
+            this.emitClipTaskUpdate(taskId)
+          }
+        ).then(result => {
+          this.db.updateClipTask(taskId, { progress: 100, status: 'done', file_path: (result as { path: string }).path })
+          this.emitClipTaskUpdate(taskId)
+        }).catch(error => {
+          this.db.updateClipTask(taskId, { status: 'error', message: error.message })
+          this.emitClipTaskUpdate(taskId)
+        })
+
       } catch (error) {
         this.sendError(res, error)
       }
     })
+  }
+
+  private emitClipTaskUpdate(taskId: number) {
+    const tasks = this.db.getClipTasks()
+    const task = tasks.find(t => t.id === taskId)
+    if (!task) return
+    const raw = JSON.stringify({ type: 'clip_task_update', data: task })
+    for (const client of this.wss.clients) {
+      if (client.readyState === client.OPEN) {
+        client.send(raw)
+      }
+    }
   }
 
   // ──────────────────────── Runtime / Queue ────────────────────────
@@ -894,7 +1012,15 @@ class DesktopBackend {
 
 export async function startDesktopBackend(options?: { baseDir?: string }) {
   const baseDir = detectBaseDir(options?.baseDir || process.cwd())
-  const backend = await DesktopBackend.create(baseDir)
+
+  // Use Electron's net.fetch (Chromium network stack) to avoid TLS fingerprint blocking
+  let customFetch: typeof globalThis.fetch | undefined
+  try {
+    const { net } = require('electron')
+    if (net?.fetch) customFetch = net.fetch.bind(net)
+  } catch {}
+
+  const backend = await DesktopBackend.create(baseDir, customFetch)
   const baseURL = await backend.listen()
   return {
     baseURL,

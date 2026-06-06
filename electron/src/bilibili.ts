@@ -7,11 +7,15 @@ export const USER_AGENT =
 
 export class BilibiliClient {
   private cookies = new Map<string, string>()
+  private customFetch: typeof globalThis.fetch
 
   constructor(
     private config: AppConfig,
     private db: SqliteStore,
-  ) {}
+    customFetch?: typeof globalThis.fetch,
+  ) {
+    this.customFetch = customFetch || globalThis.fetch
+  }
 
   public loadCookies() {
     const fromConfig = this.config.bilibili.cookies || {}
@@ -42,7 +46,7 @@ export class BilibiliClient {
     await fsp.writeFile(cookieFile, JSON.stringify(payload, null, 2), 'utf8')
   }
 
-  private cookieHeader() {
+  public cookieHeader() {
     return [...this.cookies.entries()].map(([key, value]) => `${key}=${value}`).join('; ')
   }
 
@@ -58,16 +62,17 @@ export class BilibiliClient {
     headers.set('accept', '*/*')
     headers.set('accept-language', 'zh-CN,zh;q=0.9,en;q=0.8')
     if (!headers.has('referer')) {
-      headers.set('referer', 'https://live.bilibili.com/')
+      headers.set('referer', 'https://www.bilibili.com/')
     }
     if (!headers.has('origin')) {
-      headers.set('origin', 'https://live.bilibili.com')
+      headers.set('origin', 'https://www.bilibili.com')
     }
     const cookie = this.cookieHeader()
     if (cookie) {
       headers.set('cookie', cookie)
     }
-    const response = await fetch(url, { ...init, headers })
+
+    const response = await this.customFetch(url, { ...init, headers })
     const setCookies = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
     for (const line of setCookies) {
       const pair = line.split(';', 1)[0]
@@ -102,18 +107,40 @@ export class BilibiliClient {
     const parsed = this.parseBilibiliUrl(rawUrl)
     if (!parsed) throw new Error('无法解析 B站视频链接')
     const queryParam = parsed.type === 'bv' ? `bvid=${parsed.id}` : `aid=${parsed.id}`
-    const info = await this.fetchJSON<{ code: number; message: string; data: { title: string; duration: number; cid: number; owner: { name: string; face: string }; pic: string; stat: { view: number; danmaku: number } } }>(
+    const info = await this.fetchJSON<{ code: number; message: string; data: { title: string; duration: number; cid: number; owner: { name: string; face: string }; pic: string; stat: { view: number; danmaku: number }; pages?: Array<{ cid: number; page: number; part: string; duration: number }> } }>(
       `https://api.bilibili.com/x/web-interface/view?${queryParam}`,
     )
     if (info.code !== 0) throw new Error(info.message || '获取视频信息失败')
-    const { title, duration, cid, owner, pic } = info.data
+    
+    let { title, duration, cid, owner, pic } = info.data
+    const pages = info.data.pages || []
+    if (pages.length > 0) {
+      const pageIndex = parsed.p - 1
+      if (pageIndex >= 0 && pageIndex < pages.length) {
+        cid = pages[pageIndex].cid
+        duration = pages[pageIndex].duration
+        if (pages.length > 1 && pages[pageIndex].part) {
+          title = `${title} - P${parsed.p} ${pages[pageIndex].part}`
+        }
+      }
+    }
 
-    const playUrl = await this.fetchJSON<{ code: number; data: { dash?: { audio: Array<{ id: number; base_url: string; bandwidth: number; codecs: string }>; video: Array<{ id: number; base_url: string; bandwidth: number; codecs: string; width: number; height: number; frame_rate: string }> } } }>(
-      `https://api.bilibili.com/x/player/playurl?${queryParam}&cid=${cid}&fnval=4048`,
+    let playUrl = await this.fetchJSON<{ code: number; message?: string; data: { dash?: { audio: Array<{ id: number; base_url: string; bandwidth: number; codecs: string }>; video: Array<{ id: number; base_url: string; bandwidth: number; codecs: string; width: number; height: number; frame_rate: string }> } } }>(
+      `https://api.bilibili.com/x/player/playurl?${queryParam}&cid=${cid}&qn=127&fourk=1&fnval=4048`,
     )
+    if (playUrl.code !== 0 || !playUrl?.data?.dash?.audio?.length) {
+      // 尝试降级请求（不要求 4K，qn=32），用于兼容未登录状态
+      playUrl = await this.fetchJSON<{ code: number; message?: string; data: { dash?: { audio: Array<{ id: number; base_url: string; bandwidth: number; codecs: string }>; video: Array<{ id: number; base_url: string; bandwidth: number; codecs: string; width: number; height: number; frame_rate: string }> } } }>(
+        `https://api.bilibili.com/x/player/playurl?${queryParam}&cid=${cid}&qn=32&fnval=4048`,
+      )
+    }
+    if (playUrl.code !== 0) {
+      throw new Error(`无法获取播放地址: ${playUrl.message || playUrl.code} (可能需要登录)`)
+    }
+
     const audioList = playUrl?.data?.dash?.audio || []
     const videoList = playUrl?.data?.dash?.video || []
-    if (audioList.length === 0) throw new Error('无法获取音频流')
+    if (audioList.length === 0) throw new Error('此视频没有提供 DASH 音频流，通常是因为未登录或视频格式受限')
     audioList.sort((a, b) => b.bandwidth - a.bandwidth)
     const audioUrl = audioList[0].base_url
 
@@ -121,17 +148,19 @@ export class BilibiliClient {
       title, duration, cid, author: owner.name, cover: pic,
       audioUrl, audioCodec: audioList[0].codecs || 'aac',
       qualities: {
-        audio: audioList.map(a => ({ id: a.id, bandwidth: a.bandwidth, codecs: a.codecs })),
-        video: videoList.map(v => ({ id: v.id, bandwidth: v.bandwidth, codecs: v.codecs, width: v.width, height: v.height, frameRate: v.frame_rate })),
+        audio: audioList.map(a => ({ id: a.id, bandwidth: a.bandwidth, codecs: a.codecs, baseUrl: a.base_url })),
+        video: videoList.map(v => ({ id: v.id, bandwidth: v.bandwidth, codecs: v.codecs, width: v.width, height: v.height, frameRate: v.frame_rate, baseUrl: v.base_url })),
       },
     }
   }
 
-  public parseBilibiliUrl(url: string): { type: 'bv' | 'av'; id: string } | null {
+  public parseBilibiliUrl(url: string): { type: 'bv' | 'av'; id: string; p: number } | null {
+    const pMatch = url.match(/[?&]p=(\d+)/)
+    const p = pMatch ? parseInt(pMatch[1], 10) : 1
     const bvMatch = url.match(/BV([a-zA-Z0-9]+)/)
-    if (bvMatch) return { type: 'bv', id: `BV${bvMatch[1]}` }
+    if (bvMatch) return { type: 'bv', id: `BV${bvMatch[1]}`, p }
     const avMatch = url.match(/av(\d+)/i)
-    if (avMatch) return { type: 'av', id: avMatch[1] }
+    if (avMatch) return { type: 'av', id: avMatch[1], p }
     return null
   }
 

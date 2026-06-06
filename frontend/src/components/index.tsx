@@ -132,7 +132,7 @@ export function LoginModal({ apiClient, onClose, onSuccess }: { apiClient: Axios
   }, [apiClient, key, onSuccess, t])
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm sm:p-6">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm sm:p-6" onClick={e => { if (e.target === e.currentTarget) onClose() }}>
       <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col pt-6 pb-8 px-6 relative">
         <button
           onClick={onClose}
