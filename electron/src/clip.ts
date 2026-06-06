@@ -198,10 +198,11 @@ export class ClipService {
     tempDir: string, onProgress?: ClipProgressCallback,
   ): Promise<{ size: number; message?: string }> {
     const totalDuration = endTime - startTime
+    const PADDING = 15
 
-    // ── Step 1: Download raw clip (with small padding for seek accuracy) ──
-    const paddedStart = Math.max(0, startTime - 5)
-    const paddedDuration = totalDuration + 10
+    // ── Step 1: Download raw clip (with padding for seek accuracy) ──
+    const paddedStart = Math.max(0, startTime - PADDING)
+    const paddedDuration = totalDuration + PADDING + 10
     const rawPath = path.join(tempDir, 'raw.mp4')
 
     onProgress?.(1, '下载中...')
@@ -222,14 +223,23 @@ export class ClipService {
     if (!fs.existsSync(rawPath) || fs.statSync(rawPath).size === 0) {
       throw new Error('下载失败：临时文件为空')
     }
-    onProgress?.(30, '下载完成，开始编码...')
+    onProgress?.(30, '下载完成，分析关键帧...')
 
-    // ── Step 2: Re-encode from local file (much faster than from remote) ──
+    // ── Step 2: Compute seek offset from GOP ──
+    // When ffmpeg uses `-ss` before `-i` with `-c copy`, it seeks to the
+    // nearest keyframe BEFORE paddedStart. The file starts at that keyframe,
+    // NOT at paddedStart. We need to correct for this offset.
+    const keyframes = await this.findKeyframes(rawPath)
+    const gop = keyframes.length >= 2 ? keyframes[1] - keyframes[0] : 5
+    const seekOffset = gop > 0 ? (paddedStart % gop) : 0
+    const relStart = (startTime - paddedStart) + seekOffset
+
+    console.log(`[reencode] GOP=${gop.toFixed(2)}s, seekOffset=${seekOffset.toFixed(2)}s, relStart=${relStart.toFixed(2)}s`)
+
+    // ── Step 3: Re-encode from local file ──
     // Use -ss AFTER -i (output seeking) for frame-accurate start position.
-    // Input seeking (-ss before -i) snaps to the nearest keyframe, causing
-    // the same PTS offset issue as copy mode.
-    const relStart = startTime - paddedStart
-    console.log(`[reencode] Step 2: Re-encode from local file, relStart=${relStart.toFixed(2)}s, duration=${totalDuration.toFixed(1)}s`)
+    onProgress?.(35, '重编码中...')
+    console.log(`[reencode] Step 3: Re-encode, relStart=${relStart.toFixed(2)}s, duration=${totalDuration.toFixed(1)}s`)
     await this.runFfmpegWithEncodingProgress(
       [
         '-i', rawPath,
@@ -244,7 +254,7 @@ export class ClipService {
         '-y', outPath,
       ],
       totalDuration,
-      (pct, msg) => onProgress?.(30 + pct * 68, `重编码: ${msg}`),
+      (pct, msg) => onProgress?.(35 + pct * 63, `重编码: ${msg}`),
     )
 
     onProgress?.(100, '重编码完成')
