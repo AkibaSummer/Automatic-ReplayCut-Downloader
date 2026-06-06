@@ -534,7 +534,7 @@ class DesktopBackend {
           },
           prefixCut !== false,
           suffixTime !== false,
-          clipMode || 'smart',
+          clipMode || 'copy',
         ).then(result => {
           const r = result as { path: string; message?: string }
           this.db.updateClipTask(taskId, { progress: 100, status: 'done', file_path: r.path, message: r.message || '' })

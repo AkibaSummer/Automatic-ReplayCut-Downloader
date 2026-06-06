@@ -141,17 +141,26 @@ export class ClipService {
     }
     onProgress?.(50, '下载完成，分析关键帧...')
 
-    // ── Step 2: Detect keyframes & find precise boundaries ──
+    // ── Step 2: Detect keyframes & compute seek offset ──
+    // When ffmpeg uses `-ss` before `-i` with `-c copy`, it seeks to the
+    // nearest keyframe BEFORE paddedStart. This means PTS 0 in the file
+    // may correspond to a stream time earlier than paddedStart.
+    // We compute this offset from the GOP interval so that relStart/relEnd
+    // correctly map to the user's selected times.
     const keyframes = await this.findKeyframes(paddedPath)
-    const relStart = startTime - paddedStart
-    const relEnd = endTime - paddedStart
-    console.log(`[copy-cut] Keyframes: ${keyframes.length}, relStart=${relStart.toFixed(2)}, relEnd=${relEnd.toFixed(2)}`)
+    const gop = keyframes.length >= 2 ? keyframes[1] - keyframes[0] : 5
+    const seekOffset = gop > 0 ? (paddedStart % gop) : 0
+    const relStart = (startTime - paddedStart) + seekOffset
+    const relEnd = (endTime - paddedStart) + seekOffset
+
+    console.log(`[copy-cut] Keyframes: ${keyframes.length}, GOP=${gop.toFixed(2)}s, seekOffset=${seekOffset.toFixed(2)}s`)
+    console.log(`[copy-cut] relStart=${relStart.toFixed(2)}, relEnd=${relEnd.toFixed(2)}`)
 
     // Find the nearest keyframe at or before relStart
     const KF_TOLERANCE = 0.05
     const kfStart = [...keyframes].reverse().find(kf => kf <= relStart + KF_TOLERANCE) ?? 0
     const startDiff = relStart - kfStart
-    // Duration from kfStart to relEnd (tail is precise, head may be early)
+    // Duration from kfStart to relEnd (tail is precise, head aligns to keyframe)
     const copyDuration = relEnd - kfStart
 
     console.log(`[copy-cut] kfStart=${kfStart.toFixed(2)}s (${startDiff > 0.1 ? `${startDiff.toFixed(1)}s early` : 'exact'}), copyDuration=${copyDuration.toFixed(1)}s`)
@@ -216,11 +225,15 @@ export class ClipService {
     onProgress?.(30, '下载完成，开始编码...')
 
     // ── Step 2: Re-encode from local file (much faster than from remote) ──
+    // Use -ss AFTER -i (output seeking) for frame-accurate start position.
+    // Input seeking (-ss before -i) snaps to the nearest keyframe, causing
+    // the same PTS offset issue as copy mode.
     const relStart = startTime - paddedStart
     console.log(`[reencode] Step 2: Re-encode from local file, relStart=${relStart.toFixed(2)}s, duration=${totalDuration.toFixed(1)}s`)
     await this.runFfmpegWithEncodingProgress(
       [
-        '-ss', `${relStart}`, '-i', rawPath,
+        '-i', rawPath,
+        '-ss', `${relStart}`,
         '-t', `${totalDuration}`,
         '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
         '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
