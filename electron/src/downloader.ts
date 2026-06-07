@@ -163,21 +163,11 @@ export class DownloaderService {
       }
     }
 
-    const localM3U8Path = path.join(this.config.download.temp_dir, `${replay.live_key}_local.m3u8`)
-    const playlist = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:10', '#EXT-X-MEDIA-SEQUENCE:0']
-    for (let i = 0; i < allSegmentFiles.length; i += 1) {
-      playlist.push(`#EXTINF:${(allSegmentDurations[i] || 10).toFixed(6)},`)
-      playlist.push(allSegmentFiles[i].replaceAll('\\', '/'))
-    }
-    playlist.push('#EXT-X-ENDLIST')
-    await fsp.writeFile(localM3U8Path, playlist.join('\n'), 'utf8')
-
     this.db.patchReplay(replay.live_key, { status: 'merging', message: 'Merging all segments...', progress: 99 })
     this.emitProgress({ live_key: replay.live_key, status: 'merging', progress: 99, merge_progress: 0, message: 'Merging all segments...' })
 
-    await this.runFfmpegMerge(replay.live_key, localM3U8Path, finalPath, expectedDuration, signal)
+    await this.runFfmpegMerge(replay.live_key, allSegmentFiles, finalPath, expectedDuration, signal)
 
-      await fsp.rm(localM3U8Path, { force: true })
       for (const dir of streamDirs) {
         await fsp.rm(dir, { recursive: true, force: true })
       }
@@ -224,12 +214,9 @@ export class DownloaderService {
     return segments
   }
 
-  private async runFfmpegMerge(liveKey: string, inputM3U8: string, outputPath: string, expectedSeconds: number, signal: AbortSignal) {
-    const segments = await this.parseM3U8(inputM3U8)
+  private async runFfmpegMerge(liveKey: string, segmentFiles: string[], outputPath: string, expectedSeconds: number, signal: AbortSignal) {
     let totalBytes = 0
-    for (const seg of segments) {
-      const localPath = decodeURI(new URL(seg.url).pathname).replace(/\//g, path.sep)
-      const fullPath = path.join(path.dirname(inputM3U8), path.basename(localPath))
+    for (const fullPath of segmentFiles) {
       if (fs.existsSync(fullPath)) {
         totalBytes += fs.statSync(fullPath).size
       }
@@ -247,13 +234,11 @@ export class DownloaderService {
 
           const appendNext = (idx: number) => {
             if (signal.aborted) return
-            if (idx >= segments.length) {
+            if (idx >= segmentFiles.length) {
               outStream.end(() => resolve())
               return
             }
-            const seg = segments[idx]
-            const localPath = decodeURI(new URL(seg.url).pathname).replace(/\//g, path.sep)
-            const fullPath = path.join(path.dirname(inputM3U8), path.basename(localPath))
+            const fullPath = segmentFiles[idx]
             if (!fs.existsSync(fullPath)) {
               appendNext(idx + 1)
               return
