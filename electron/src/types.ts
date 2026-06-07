@@ -54,6 +54,7 @@ export type ReplayRecord = {
 }
 
 export type StreamSlice = {
+  id: number
   replay_id: number
   start_time: number
   end_time: number

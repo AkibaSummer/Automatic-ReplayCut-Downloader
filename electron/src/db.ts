@@ -245,7 +245,7 @@ export class SqliteStore {
     ).all() as Record<string, unknown>[]
     
     const streams = this.prepare(
-      `SELECT replay_id, start_time, end_time, stream, type, m3_u8_text
+      `SELECT id, replay_id, start_time, end_time, stream, type, m3_u8_text
        FROM stream_slices
        WHERE deleted_at IS NULL
        ORDER BY id ASC`,
@@ -256,6 +256,7 @@ export class SqliteStore {
       const replayId = safeNumber(stream.replay_id)
       const list = streamMap.get(replayId) ?? []
       list.push({
+        id: safeNumber(stream.id),
         replay_id: replayId,
         start_time: safeNumber(stream.start_time),
         end_time: safeNumber(stream.end_time),

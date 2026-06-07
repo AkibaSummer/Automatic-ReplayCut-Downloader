@@ -196,6 +196,7 @@ export class BilibiliClient {
     for (const item of list) {
       const response = await this.fetchWithCookies(item.stream)
       rows.push({
+        id: 0,
         replay_id: replay.replay_id,
         start_time: safeNumber(item.start_time),
         end_time: safeNumber(item.end_time),
