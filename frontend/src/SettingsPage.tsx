@@ -43,7 +43,7 @@ export function SettingsPage({
             onClick={handleQuitApp}
             className="flex items-center px-4 py-2 bg-white border border-slate-300 text-slate-700 rounded-lg font-medium transition hover:bg-slate-50"
           >
-            退出程序
+            {t('settings.quitApp')}
           </button>
           <button
             onClick={handleSaveConfig}

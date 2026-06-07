@@ -124,7 +124,8 @@
     "outputTip": "Changing directory will migrate existing files.",
     "filenameTpl": "Filename Template",
     "maxTasks": "Max Tasks",
-    "segConc": "Segment Concurrency"
+    "segConc": "Segment Concurrency",
+    "quitApp": "Quit App"
   },
   "messages": {
     "refreshing": "Refreshing…",

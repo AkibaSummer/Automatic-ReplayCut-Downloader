@@ -124,7 +124,8 @@
     "outputTip": "修改目录会自动搬迁已下载的视频与封面文件。",
     "filenameTpl": "文件名模板",
     "maxTasks": "任务并发",
-    "segConc": "分片并发"
+    "segConc": "分片并发",
+    "quitApp": "退出程序"
   },
   "messages": {
     "refreshing": "正在刷新…",
