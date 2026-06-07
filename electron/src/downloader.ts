@@ -190,16 +190,26 @@ export class DownloaderService {
     }
   }
 
-  private async downloadSegment(url: string, targetPath: string, signal: AbortSignal) {
+  private async downloadSegment(url: string, targetPath: string, signal: AbortSignal, retries = 3): Promise<number> {
     const tmpPath = `${targetPath}.tmp`
-    const response = await this.bilibiliClient.fetchWithCookies(url, { signal })
-    if (!response.ok) {
-      throw new Error(`segment download failed: ${response.status} ${response.statusText}`)
+    try {
+      const response = await this.bilibiliClient.fetchWithCookies(url, { signal })
+      if (!response.ok) {
+        throw new Error(`segment download failed: ${response.status} ${response.statusText}`)
+      }
+      const buffer = Buffer.from(await response.arrayBuffer())
+      await fsp.writeFile(tmpPath, buffer)
+      await fsp.rename(tmpPath, targetPath)
+      return buffer.byteLength
+    } catch (err) {
+      if (signal.aborted) throw err
+      if (retries > 0) {
+        console.warn(`[downloader] Segment download failed, retrying... (${retries} left): ${url}`)
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        return this.downloadSegment(url, targetPath, signal, retries - 1)
+      }
+      throw err
     }
-    const buffer = Buffer.from(await response.arrayBuffer())
-    await fsp.writeFile(tmpPath, buffer)
-    await fsp.rename(tmpPath, targetPath)
-    return buffer.byteLength
   }
 
   private async parseM3U8(streamUrl: string, existingText?: string) {

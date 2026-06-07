@@ -57,32 +57,43 @@ export class BilibiliClient {
   }
 
   public async fetchWithCookies(url: string | URL, init?: RequestInit) {
-    const headers = new Headers(init?.headers ?? {})
-    headers.set('user-agent', USER_AGENT)
-    headers.set('accept', '*/*')
-    headers.set('accept-language', 'zh-CN,zh;q=0.9,en;q=0.8')
-    if (!headers.has('referer')) {
-      headers.set('referer', 'https://www.bilibili.com/')
-    }
-    if (!headers.has('origin')) {
-      headers.set('origin', 'https://www.bilibili.com')
-    }
-    const cookie = this.cookieHeader()
-    if (cookie) {
-      headers.set('cookie', cookie)
+    const controller = new AbortController()
+    let timer: NodeJS.Timeout | undefined
+    if (!init?.signal) {
+      timer = setTimeout(() => controller.abort(new Error('Request Timeout')), 15000)
     }
 
-    const response = await this.customFetch(url, { ...init, headers })
-    const setCookies = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
-    for (const line of setCookies) {
-      const pair = line.split(';', 1)[0]
-      const index = pair.indexOf('=')
-      if (index > 0) {
-        this.cookies.set(pair.slice(0, index), pair.slice(index + 1))
+    try {
+      const headers = new Headers(init?.headers ?? {})
+      headers.set('user-agent', USER_AGENT)
+      headers.set('accept', '*/*')
+      headers.set('accept-language', 'zh-CN,zh;q=0.9,en;q=0.8')
+      if (!headers.has('referer')) {
+        headers.set('referer', 'https://www.bilibili.com/')
       }
+      if (!headers.has('origin')) {
+        headers.set('origin', 'https://www.bilibili.com')
+      }
+      const cookie = this.cookieHeader()
+      if (cookie) {
+        headers.set('cookie', cookie)
+      }
+
+      const response = await this.customFetch(url, { ...init, headers, signal: init?.signal || controller.signal })
+      const setCookies = (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
+      for (const line of setCookies) {
+        const pair = line.split(';', 1)[0]
+        const index = pair.indexOf('=')
+        if (index > 0) {
+          this.cookies.set(pair.slice(0, index), pair.slice(index + 1))
+        }
+      }
+      return response
+    } finally {
+      if (timer) clearTimeout(timer)
     }
-    return response
   }
+
 
   public async getCurrentUser() {
     try {
