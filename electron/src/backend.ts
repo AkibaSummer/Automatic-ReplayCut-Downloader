@@ -1004,22 +1004,8 @@ class DesktopBackend {
         else alreadyUpToDate += 1
       }
 
-      const existing = this.db.getReplays(this.baseDir)
-      for (const replay of existing) {
-        if (liveKeys.has(replay.live_key)) continue
-        const coverPath = replay.local_cover
-          ? path.join(this.config.download.output_dir, 'covers', replay.local_cover.replace(/^covers[/\\]/, ''))
-          : ''
-        const fileExists = replay.file_path ? fs.existsSync(replay.file_path) : false
-        const coverExists = coverPath ? fs.existsSync(coverPath) : false
-        if (replay.status === 'deleted' && (fileExists || coverExists)) {
-          const restoredStatus = fileExists ? 'completed' : 'not_downloaded'
-          this.db
-            .prepare('UPDATE bilibili_replays SET status = ?, message = ?, updated_at = ? WHERE live_key = ?')
-            .run(restoredStatus, 'Retained local replay outside remote scan window', now, replay.live_key)
-          restoredHistorical += 1
-        }
-      }
+      // We no longer restore deleted replays to not_downloaded.
+      // If the user manually deleted it, it stays deleted.
     })
     updatedRecords += restoredHistorical
     const markedDeleted = 0

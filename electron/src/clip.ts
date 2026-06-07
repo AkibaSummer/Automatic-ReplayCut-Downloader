@@ -322,18 +322,46 @@ export class ClipService {
 
   private runFfmpegCommand(args: string[]): Promise<void> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
-    return new Promise((resolve, reject) => {
-      console.log(`[ffmpeg] ${args.slice(0, 6).join(' ')} ...`)
-      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-      let stderr = ''
-      proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
-      proc.on('close', (code) => {
-        if (code !== 0) {
-          console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-          reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
-        } else resolve()
+    
+    const run = (extraArgs: string[]) => {
+      return new Promise<void>((resolve, reject) => {
+        const fullArgs = args.slice(0, args.length - 2).concat(extraArgs).concat(args.slice(args.length - 2))
+        if (extraArgs.length > 0 && !fullArgs.includes('-y')) {
+           // fallback just in case
+        }
+        // Actually, just inject extraArgs before the last argument (output file) and -y
+        // A safer way is to just push extraArgs before the output path. The last arg is the output path.
+        // Usually args ends with '-y', outPath.
+        let finalArgs = [...args]
+        if (extraArgs.length > 0) {
+          const outPath = finalArgs.pop()!
+          const dashY = finalArgs.pop()!
+          if (dashY === '-y') {
+            finalArgs = [...finalArgs, ...extraArgs, '-y', outPath]
+          } else {
+            finalArgs = [...finalArgs, dashY, ...extraArgs, outPath]
+          }
+        }
+        
+        console.log(`[ffmpeg] ${finalArgs.slice(0, 6).join(' ')} ...`)
+        const proc = spawn(ffmpegBin, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+        let stderr = ''
+        proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
+        proc.on('close', (code) => {
+          if (code !== 0) {
+            console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
+            reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
+          } else resolve()
+        })
+        proc.on('error', (e) => reject(new Error(`FFmpeg 启动失败: ${e.message}`)))
       })
-      proc.on('error', (e) => reject(new Error(`FFmpeg 启动失败: ${e.message}`)))
+    }
+
+    return run([]).catch(err => {
+      if (err instanceof Error && err.message.includes('tag for codec hevc')) {
+        return run(['-tag:v', 'hvc1'])
+      }
+      throw err
     })
   }
 
@@ -342,26 +370,47 @@ export class ClipService {
     args: string[], outputPath: string, onSize: (sizeMB: number) => void,
   ): Promise<void> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
-    return new Promise((resolve, reject) => {
-      console.log(`[ffmpeg] ${args.slice(0, 6).join(' ')} ...`)
-      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-      let stderr = ''
-      proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
+    
+    const run = (extraArgs: string[]) => {
+      return new Promise<void>((resolve, reject) => {
+        let finalArgs = [...args]
+        if (extraArgs.length > 0) {
+          const outPath = finalArgs.pop()!
+          const dashY = finalArgs.pop()!
+          if (dashY === '-y') {
+            finalArgs = [...finalArgs, ...extraArgs, '-y', outPath]
+          } else {
+            finalArgs = [...finalArgs, dashY, ...extraArgs, outPath]
+          }
+        }
 
-      const timer = setInterval(() => {
-        try {
-          if (fs.existsSync(outputPath)) onSize(fs.statSync(outputPath).size / 1024 / 1024)
-        } catch {}
-      }, 1000)
+        console.log(`[ffmpeg] ${finalArgs.slice(0, 6).join(' ')} ...`)
+        const proc = spawn(ffmpegBin, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+        let stderr = ''
+        proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
 
-      proc.on('close', (code) => {
-        clearInterval(timer)
-        if (code !== 0) {
-          console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-          reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
-        } else resolve()
+        const timer = setInterval(() => {
+          try {
+            if (fs.existsSync(outputPath)) onSize(fs.statSync(outputPath).size / 1024 / 1024)
+          } catch {}
+        }, 1000)
+
+        proc.on('close', (code) => {
+          clearInterval(timer)
+          if (code !== 0) {
+            console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
+            reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
+          } else resolve()
+        })
+        proc.on('error', (e) => { clearInterval(timer); reject(new Error(`FFmpeg 启动失败: ${e.message}`)) })
       })
-      proc.on('error', (e) => { clearInterval(timer); reject(new Error(`FFmpeg 启动失败: ${e.message}`)) })
+    }
+
+    return run([]).catch(err => {
+      if (err instanceof Error && err.message.includes('tag for codec hevc')) {
+        return run(['-tag:v', 'hvc1'])
+      }
+      throw err
     })
   }
 
