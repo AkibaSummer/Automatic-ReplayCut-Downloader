@@ -239,42 +239,46 @@ export class DownloaderService {
     const outStream = createWriteStream(tempPath)
     let written = 0
 
-    await new Promise<void>((resolve, reject) => {
-      signal.addEventListener('abort', () => { outStream.close(); reject(new Error('aborted')) }, { once: true })
-      outStream.on('error', reject)
-
-      const appendNext = (idx: number) => {
-        if (signal.aborted) return
-        if (idx >= segments.length) {
-          outStream.end(() => resolve())
-          return
-        }
-        const seg = segments[idx]
-        const localPath = decodeURI(new URL(seg.url).pathname).replace(/\//g, path.sep)
-        const fullPath = path.join(path.dirname(inputM3U8), path.basename(localPath))
-        if (!fs.existsSync(fullPath)) {
-          appendNext(idx + 1)
-          return
-        }
-        const rs = createReadStream(fullPath)
-        rs.on('data', (chunk: string | Buffer) => {
-          written += chunk.length
-          const mergeProgress = totalBytes > 0 ? Math.max(0, Math.min(100, (written / totalBytes) * 100)) : 0
-          this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: mergeProgress, message: `Merging... ${Math.round(mergeProgress)}%` })
-        })
-        rs.on('end', () => appendNext(idx + 1))
-        rs.on('error', reject)
-        rs.pipe(outStream, { end: false })
-      }
-      appendNext(0)
-    })
-
-    if (signal.aborted) { await fsp.rm(tempPath, { force: true }); return }
-
     try {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
+          outStream.on('error', reject)
+
+          const appendNext = (idx: number) => {
+            if (signal.aborted) return
+            if (idx >= segments.length) {
+              outStream.end(() => resolve())
+              return
+            }
+            const seg = segments[idx]
+            const localPath = decodeURI(new URL(seg.url).pathname).replace(/\//g, path.sep)
+            const fullPath = path.join(path.dirname(inputM3U8), path.basename(localPath))
+            if (!fs.existsSync(fullPath)) {
+              appendNext(idx + 1)
+              return
+            }
+            const rs = createReadStream(fullPath)
+            rs.on('data', (chunk: string | Buffer) => {
+              written += chunk.length
+              const mergeProgress = totalBytes > 0 ? Math.max(0, Math.min(100, (written / totalBytes) * 100)) : 0
+              this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: mergeProgress, message: `Merging... ${Math.round(mergeProgress)}%` })
+            })
+            rs.on('end', () => appendNext(idx + 1))
+            rs.on('error', reject)
+            rs.pipe(outStream, { end: false })
+          }
+          appendNext(0)
+        })
+      } finally {
+        outStream.close()
+      }
+
+      if (signal.aborted) return
+
       await this.remuxTsToMp4(tempPath, outputPath, signal)
     } finally {
-      await fsp.rm(tempPath, { force: true })
+      await fsp.rm(tempPath, { force: true }).catch(() => {})
     }
   }
 
