@@ -2,13 +2,18 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { Muxer, StreamTarget } from 'mp4-muxer'
-import { parseFile } from 'music-metadata'
-
 import { AppConfig, ReplayRecord, M3U8Segment, FileInfo } from './types'
 import { SqliteStore } from './db'
 import { BilibiliClient } from './bilibili'
 import { formatSeconds, uniquePath, renderFilenameTemplate } from './utils'
+import { spawn } from 'node:child_process'
+import _ffmpegPath from 'ffmpeg-static'
+import { parseFile } from 'music-metadata'
+
+function resolveFFmpegPath(): string | null {
+  if (!_ffmpegPath) return null
+  return _ffmpegPath.replace('app.asar', 'app.asar.unpacked')
+}
 
 export class DownloaderService {
   constructor(
@@ -274,188 +279,37 @@ export class DownloaderService {
   }
 
   private async remuxTsToMp4(tsPath: string, mp4Path: string, signal: AbortSignal) {
-    const buffer = fs.readFileSync(tsPath)
-    if (signal.aborted) return
-    const data = new Uint8Array(buffer)
+    const ffmpegBin = resolveFFmpegPath() || 'ffmpeg'
+    return new Promise<void>((resolve, reject) => {
+      const proc = spawn(ffmpegBin, [
+        '-i', tsPath,
+        '-c', 'copy',
+        '-movflags', '+faststart',
+        '-y', mp4Path
+      ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 
-    const patPid = 0x00
-    let pmtPid = -1
-    let videoPid = -1; let videoCodec = ''
-    let audioPid = -1; let audioCodec = ''
-    let width = 1920; let height = 1080; let sampleRate = 48000; let channels = 2
+      let stderr = ''
+      proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
 
-    for (let i = 0; i + 188 <= data.length && (videoPid < 0 || audioPid < 0); i += 188) {
-      if (data[i] !== 0x47) continue
-      const pid = ((data[i + 1] & 0x1F) << 8) | data[i + 2]
-      if (pid === patPid && pmtPid < 0) pmtPid = this.parsePatPmtPid(data, i)
-      if (pmtPid >= 0 && pid === pmtPid) {
-        const info = this.parsePmtInfo(data, i)
-        if (info.videoPid >= 0) { videoPid = info.videoPid; videoCodec = info.videoCodec; width = info.width; height = info.height }
-        if (info.audioPid >= 0) { audioPid = info.audioPid; audioCodec = info.audioCodec; sampleRate = info.sampleRate; channels = info.channels }
+      const onAbort = () => {
+        proc.kill()
+        reject(new Error('aborted'))
       }
-    }
-    if (videoPid < 0 && audioPid < 0) { fs.writeFileSync(mp4Path, buffer); return }
+      signal.addEventListener('abort', onAbort, { once: true })
 
-    const outStream = createWriteStream(mp4Path)
-    
-    // FIX: Replaced ArrayBufferTarget with StreamTarget to fix OOM issue.
-    const muxer = new Muxer({
-      target: new StreamTarget({
-        onData: (chunk, position) => {
-          outStream.write(chunk)
-        }
-      }),
-      video: videoPid >= 0 ? { codec: (videoCodec || 'avc') as 'avc' | 'hevc', width, height } : undefined,
-      audio: audioPid >= 0 ? { codec: (audioCodec || 'aac') as 'aac' | 'opus', numberOfChannels: channels, sampleRate } : undefined,
-      fastStart: 'in-memory',
-      firstTimestampBehavior: 'offset',
+      proc.on('close', (code) => {
+        signal.removeEventListener('abort', onAbort)
+        if (code === 0) resolve()
+        else reject(new Error(`ffmpeg remux failed: ${stderr.slice(-500)}`))
+      })
+      proc.on('error', (e) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(e)
+      })
     })
-
-    const accumVideo = new Uint8Array(4 * 1024 * 1024)
-    const accumAudio = new Uint8Array(512 * 1024)
-    let accumVideoLen = 0; let accumAudioLen = 0
-    let videoPts = 0; let audioPts = 0
-    let hasKeyFrame = false
-
-    const processVideoPes = (payload: Uint8Array) => {
-      let idx = 0
-      const buf = payload
-      const end = buf.length
-      while (idx + 4 < end) {
-        let start = -1
-        if (buf[idx] === 0 && buf[idx + 1] === 0 && buf[idx + 2] === 1) { start = idx; idx += 3 }
-        else if (buf[idx] === 0 && buf[idx + 1] === 0 && buf[idx + 2] === 0 && buf[idx + 3] === 1) { start = idx; idx += 4 }
-        else { idx++; continue }
-        let nalEnd = end
-        for (let j = idx; j + 2 < end; j++) {
-          if (buf[j] === 0 && buf[j + 1] === 0 && (buf[j + 2] === 1 || (buf[j + 2] === 0 && buf[j + 3] === 1))) { nalEnd = j; break }
-        }
-        const nalType = buf[idx] & 0x1F
-        if (nalType === 5) hasKeyFrame = true
-        if (hasKeyFrame) {
-          const body = buf.subarray(idx, nalEnd)
-          const avcc = new Uint8Array(4 + body.length)
-          const sz = body.length
-          avcc[0] = (sz >> 24) & 0xFF; avcc[1] = (sz >> 16) & 0xFF
-          avcc[2] = (sz >> 8) & 0xFF; avcc[3] = sz & 0xFF
-          avcc.set(body, 4)
-          muxer.addVideoChunkRaw(avcc, nalType === 5 ? 'key' : 'delta', videoPts, 0)
-        }
-        idx = nalEnd
-      }
-    }
-
-    const sampleRateTable = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
-    const processAudioPes = (payload: Uint8Array) => {
-      let idx = 0
-      const buf = payload
-      const end = buf.length
-      while (idx + 2 < end) {
-        if (buf[idx] === 0xFF && (buf[idx + 1] & 0xF6) === 0xF0) {
-          const prot = (buf[idx + 1] & 0x01) !== 0
-          const srIdx = (buf[idx + 1] & 0x3C) >> 2
-          const headerLen = prot ? 7 : 9
-          const rawLen = (((buf[idx + 3] & 0x03) << 11) | ((buf[idx + 4] & 0xFF) << 3) | ((buf[idx + 5] & 0xE0) >> 5)) - headerLen
-          if (rawLen > 0 && idx + headerLen + rawLen <= end) {
-            muxer.addAudioChunkRaw(buf.subarray(idx + headerLen, idx + headerLen + rawLen), 'key', audioPts, (1024 * 1000000) / (sampleRateTable[srIdx] || 48000))
-            audioPts += (1024 * 1000000) / (sampleRateTable[srIdx] || 48000)
-          }
-          idx += headerLen + Math.max(0, rawLen)
-        } else { idx++ }
-      }
-    }
-
-    for (let i = 0; i + 188 <= data.length; i += 188) {
-      if (signal.aborted) return
-      if (data[i] !== 0x47) continue
-      const pid = ((data[i + 1] & 0x1F) << 8) | data[i + 2]
-      const isPusi = (data[i + 1] & 0x40) !== 0
-      const afc = (data[i + 3] & 0x30) >> 4
-      let pStart = 4
-      if (afc === 3) pStart = 5 + data[i + 4]
-      const payload = data.subarray(i + pStart, i + 188)
-
-      if (pid === videoPid) {
-        if (isPusi) {
-          if (accumVideoLen > 0) processVideoPes(accumVideo.subarray(0, accumVideoLen))
-          accumVideoLen = 0
-          if (payload[0] < payload.length && payload.length >= 10) {
-            const pesStart = 1 + payload[0]
-            if (pesStart + 5 < payload.length && (payload[pesStart + 7] & 0x80)) {
-              videoPts = Number((BigInt(payload[pesStart + 9] & 0x0E) << 29n) | (BigInt(payload[pesStart + 10]) << 22n) | (BigInt(payload[pesStart + 11] & 0xFE) << 14n) | (BigInt(payload[pesStart + 12]) << 7n) | (BigInt(payload[pesStart + 13] & 0xFE) >> 1n))
-            }
-            if (pesStart < payload.length) { accumVideo.set(payload.subarray(pesStart), 0); accumVideoLen = payload.length - pesStart }
-          }
-        } else if (accumVideoLen + payload.length <= accumVideo.length) {
-          accumVideo.set(payload, accumVideoLen); accumVideoLen += payload.length
-        }
-      } else if (pid === audioPid) {
-        if (isPusi) {
-          if (accumAudioLen > 0) processAudioPes(accumAudio.subarray(0, accumAudioLen))
-          accumAudioLen = 0
-          if (payload[0] < payload.length && payload.length >= 10) {
-            const pesStart = 1 + payload[0]
-            if (pesStart + 5 < payload.length && (payload[pesStart + 7] & 0x80)) {
-              audioPts = Number((BigInt(payload[pesStart + 9] & 0x0E) << 29n) | (BigInt(payload[pesStart + 10]) << 22n) | (BigInt(payload[pesStart + 11] & 0xFE) << 14n) | (BigInt(payload[pesStart + 12]) << 7n) | (BigInt(payload[pesStart + 13] & 0xFE) >> 1n))
-            }
-            if (pesStart < payload.length) { accumAudio.set(payload.subarray(pesStart), 0); accumAudioLen = payload.length - pesStart }
-          }
-        } else if (accumAudioLen + payload.length <= accumAudio.length) {
-          accumAudio.set(payload, accumAudioLen); accumAudioLen += payload.length
-        }
-      }
-    }
-    if (accumVideoLen > 0) processVideoPes(accumVideo.subarray(0, accumVideoLen))
-    if (accumAudioLen > 0) processAudioPes(accumAudio.subarray(0, accumAudioLen))
-
-    muxer.finalize()
-    outStream.end()
   }
 
-  private parsePatPmtPid(data: Uint8Array, offset: number): number {
-    for (let i = offset + 4; i + 4 <= offset + 188; i += 4) {
-      if (((data[i] << 8) | data[i + 1]) === 0) continue
-      return ((data[i + 2] & 0x1F) << 8) | (data[i + 3] & 0xFF)
-    }
-    return -1
-  }
 
-  private parsePmtInfo(data: Uint8Array, offset: number) {
-    const result = { videoPid: -1, videoCodec: '', width: 1920, height: 1080, audioPid: -1, audioCodec: '', sampleRate: 48000, channels: 2 }
-    const ptr = data[offset + 4] & 0xFF
-    const sectionEnd = offset + 4 + (((data[offset + 1] & 0x0F) << 8) | data[offset + 2])
-    let i = offset + 4 + 1 + ptr + 4
-    i += ((data[offset + 8 + ptr] & 0x0F) << 8) | data[offset + 9 + ptr]
-    while (i + 5 <= Math.min(offset + 188, sectionEnd)) {
-      const st = data[i] & 0xFF
-      const esPid = ((data[i + 1] & 0x1F) << 8) | data[i + 2]
-      const esLen = ((data[i + 3] & 0x0F) << 8) | data[i + 4]
-      i += 5
-      const esEnd = i + esLen
-      if ((st === 0x1B || st === 0x24) && result.videoPid < 0) {
-        result.videoPid = esPid; result.videoCodec = st === 0x24 ? 'hevc' : 'avc'
-        for (let j = esEnd - 1; j - 8 >= i; j--) {
-          if (data[j - 8] === 0x28 && data[j - 7] === 0x00 && data[j - 6] === 0x00 && data[j - 5] === 0x1E) {
-            result.width = ((data[j - 2] & 0xFF) << 8) | (data[j - 1] & 0xFF)
-            result.height = ((data[j] & 0xFF) << 8) | (data[j + 1] & 0xFF)
-            break
-          }
-        }
-      } else if ((st === 0x0F || st === 0x11) && result.audioPid < 0) {
-        result.audioPid = esPid; result.audioCodec = 'aac'
-        const srTable = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350]
-        for (let j = i; j + 3 <= esEnd; j++) {
-          if (data[j] === 0xFF && (data[j + 1] & 0xF6) === 0xF0) {
-            result.sampleRate = srTable[(data[j + 1] & 0x3C) >> 2] || 48000
-            result.channels = Math.max(1, ((data[j + 1] & 0x01) << 2) | ((data[j + 2] & 0xC0) >> 6))
-            break
-          }
-        }
-      }
-      i = esEnd
-    }
-    return result
-  }
 
   private async verifyDuration(filePath: string, expectedSeconds: number) {
     if (!fs.existsSync(filePath)) return { ok: false, duration: 0 }
