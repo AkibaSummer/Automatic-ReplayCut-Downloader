@@ -305,7 +305,63 @@ export class SqliteStore {
   }
 
   getReplayByLiveKey(baseDir: string, liveKey: string) {
-    return this.getReplays(baseDir).find(item => item.live_key === liveKey) || null
+    const row = this.prepare(
+      `SELECT * FROM bilibili_replays WHERE live_key = ? AND deleted_at IS NULL`,
+    ).get<Record<string, unknown>>(liveKey)
+    if (!row) return null
+
+    const replayId = safeNumber(row.replay_id)
+    const streams = this.prepare(
+      `SELECT id, replay_id, start_time, end_time, stream, type, m3_u8_text
+       FROM stream_slices
+       WHERE replay_id = ? AND deleted_at IS NULL
+       ORDER BY id ASC`,
+    ).all<Record<string, unknown>>(replayId)
+
+    const streamSlices: StreamSlice[] = streams.map(s => ({
+      id: safeNumber(s.id),
+      replay_id: safeNumber(s.replay_id),
+      start_time: safeNumber(s.start_time),
+      end_time: safeNumber(s.end_time),
+      stream: String(s.stream || ''),
+      type: safeNumber(s.type),
+      m3u8_text: String(s.m3_u8_text || ''),
+    }))
+
+    let filePath = String(row.file_path || '')
+    if (filePath && !path.isAbsolute(filePath)) {
+      filePath = resolveAppPathWithBase(baseDir, filePath)
+    }
+    if (filePath && !fs.existsSync(filePath) && ['completed', 'deleted'].includes(String(row.status || ''))) {
+      filePath = ''
+    }
+
+    return {
+      ID: safeNumber(row.id),
+      UpdatedAt: String(row.updated_at || ''),
+      replay_id: replayId,
+      live_key: String(row.live_key || ''),
+      room_id: safeNumber(row.room_id),
+      title: String(row.title || ''),
+      start_time: safeNumber(row.start_time),
+      end_time: safeNumber(row.end_time),
+      duration: safeNumber(row.duration),
+      file_path: filePath,
+      cover_url: String(row.cover_url || ''),
+      local_cover: String(row.local_cover || ''),
+      file_size: safeNumber(row.file_size),
+      resolution: String(row.resolution || ''),
+      bitrate: String(row.bitrate || ''),
+      progress: safeNumber(row.progress),
+      speed: String(row.speed || ''),
+      elapsed: String(row.elapsed || ''),
+      eta: String(row.eta || ''),
+      status: String(row.status || 'not_downloaded'),
+      message: String(row.message || ''),
+      verify_ok: boolFromDb(row.verify_ok),
+      actual_duration: safeNumber(row.actual_dur),
+      streams: streamSlices,
+    } satisfies ReplayRecord
   }
 
   patchReplay(
@@ -335,16 +391,16 @@ export class SqliteStore {
            updated_at = ?
        WHERE live_key = ?`,
     ).run(
-      next.file_path || '',
-      next.file_size || 0,
-      next.resolution || '',
-      next.bitrate || '',
-      next.progress || 0,
-      next.speed || '',
-      next.elapsed || '',
-      next.eta || '',
-      next.status || 'not_downloaded',
-      next.message || '',
+      next.file_path ?? '',
+      next.file_size ?? 0,
+      next.resolution ?? '',
+      next.bitrate ?? '',
+      next.progress ?? 0,
+      next.speed ?? '',
+      next.elapsed ?? '',
+      next.eta ?? '',
+      next.status ?? 'not_downloaded',
+      next.message ?? '',
       next.verify_ok ? 1 : 0,
       (next as any).actual_dur ?? next.actual_duration ?? 0,
       new Date().toISOString(),

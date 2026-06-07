@@ -416,7 +416,15 @@ class DesktopBackend {
       try {
         const url = req.query.url as string
         if (!url) throw new Error('Missing cover URL')
-        // Use native fetch for images because Chromium net.fetch might block cross-origin HTTP images
+        // Validate URL domain to prevent SSRF
+        try {
+          const parsed = new URL(url)
+          const allowed = ['hdslb.com', 'bilibili.com', 'bilivideo.com', 'biliimg.com', 'akamaized.net']
+          if (!allowed.some(d => parsed.hostname === d || parsed.hostname.endsWith('.' + d))) {
+            res.status(400).json({ error: 'Domain not allowed' })
+            return
+          }
+        } catch { res.status(400).json({ error: 'Invalid URL' }); return }
         const response = await fetch(url, { headers: { 'Referer': 'https://www.bilibili.com/' } })
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         const contentType = response.headers.get('content-type') || 'image/jpeg'
@@ -506,9 +514,7 @@ class DesktopBackend {
           return
         }
 
-        // For non-duration requests, use ffmpeg to stream directly too
-        const cookie = this.bilibiliClient.cookieHeader()
-        const headers = `Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nCookie: ${cookie}\r\n`
+        // For non-duration requests, stream directly via authenticated fetch
         const response = await this.bilibiliClient.fetchWithCookies(url)
         res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
         res.setHeader('content-length', response.headers.get('content-length') || '')
@@ -573,8 +579,13 @@ class DesktopBackend {
           res.status(404).json({ ok: false, message: 'File not found' })
           return
         }
-        const { exec } = await import('node:child_process')
-        exec(`start "" "${filePath}"`)
+        try {
+          const { shell } = require('electron')
+          await shell.openPath(filePath)
+        } catch {
+          const { exec } = await import('node:child_process')
+          exec(`start "" "${filePath.replace(/"/g, '')}"`)  
+        }
         res.json({ ok: true })
       } catch (error) {
         this.sendError(res, error)
@@ -795,7 +806,6 @@ class DesktopBackend {
     const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
     if (!replay) return false
     this.pausedTasks.add(liveKey)
-    this.runtimePaused = false
     this.removeFromQueue(liveKey)
     this.db.patchReplay(liveKey, {
       status: 'paused',
@@ -962,7 +972,6 @@ class DesktopBackend {
     )
 
     const liveKeys = new Set<string>()
-    let restoredHistorical = 0
     await this.db.withBatch(async () => {
       for (const item of rows) {
         liveKeys.add(item.live_key)
@@ -1007,7 +1016,6 @@ class DesktopBackend {
       // We no longer restore deleted replays to not_downloaded.
       // If the user manually deleted it, it stays deleted.
     })
-    updatedRecords += restoredHistorical
     const markedDeleted = 0
 
     return {
@@ -1027,12 +1035,7 @@ class DesktopBackend {
       const filename = `${liveKey}${ext}`
       const fullPath = path.join(this.config.download.output_dir, 'covers', filename)
       if (!fs.existsSync(fullPath)) {
-        const response = await fetch(coverUrl, {
-          headers: {
-            referer: 'https://live.bilibili.com/',
-            origin: 'https://live.bilibili.com',
-          },
-        })
+        const response = await this.bilibiliClient.fetchWithCookies(coverUrl)
         if (!response.ok) return ''
         const buffer = Buffer.from(await response.arrayBuffer())
         await fsp.writeFile(fullPath, buffer)

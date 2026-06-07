@@ -92,54 +92,75 @@ export class FeishuClient {
       headers['Authorization'] = `Bearer ${token}`
     }
 
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-    })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15_000)
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
 
-    if (!resp.ok) {
-      const text = await resp.text()
-      throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
+      if (!resp.ok) {
+        const text = await resp.text()
+        throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
+      }
+      return resp.json()
+    } finally {
+      clearTimeout(timer)
     }
-    return resp.json()
   }
 
   private async get(path: string, params?: Record<string, string>): Promise<any> {
     const token = await this.ensureToken()
     const qs = params ? '?' + new URLSearchParams(params).toString() : ''
     const url = `${FEISHU_API_BASE}${path}${qs}`
-    const resp = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15_000)
+    try {
+      const resp = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      })
 
-    if (!resp.ok) {
-      const text = await resp.text()
-      throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
+      if (!resp.ok) {
+        const text = await resp.text()
+        throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
+      }
+      return resp.json()
+    } finally {
+      clearTimeout(timer)
     }
-    return resp.json()
   }
 
   private async put(path: string, body: any): Promise<any> {
     const token = await this.ensureToken()
     const url = `${FEISHU_API_BASE}${path}`
-    const resp = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify(body),
-    })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15_000)
+    try {
+      const resp = await fetch(url, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      })
 
-    if (!resp.ok) {
-      const text = await resp.text()
-      throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
+      if (!resp.ok) {
+        const text = await resp.text()
+        throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
+      }
+      return resp.json()
+    } finally {
+      clearTimeout(timer)
     }
-    return resp.json()
   }
 
   // --- Public Methods ---

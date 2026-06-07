@@ -105,12 +105,12 @@ export class DownloaderService {
       const startAt = Date.now()
       const speedHistory: number[] = []
       let downloadedBytes = 0
-    let doneSegments = 0
-    let totalSegments = 0
-    let expectedDuration = 0
-    const allSegmentFiles: string[] = []
-    const allSegmentDurations: number[] = []
-    const streamDirs: string[] = []
+      let doneSegments = 0
+      let totalSegments = 0
+      let expectedDuration = 0
+      const allSegmentFiles: string[] = []
+      const allSegmentDurations: number[] = []
+      const streamDirs: string[] = []
 
     for (let streamIdx = 0; streamIdx < streams.length; streamIdx += 1) {
       if (signal.aborted) throw new Error('aborted')
@@ -230,12 +230,12 @@ export class DownloaderService {
       })
     }
 
-    this.db.patchReplay(replay.live_key, { status: 'merging', message: 'Merging all segments...', progress: 99 })
-    this.emitProgress({ live_key: replay.live_key, status: 'merging', progress: 99, merge_progress: 0, message: 'Merging all segments...' })
+      this.db.patchReplay(replay.live_key, { status: 'merging', message: 'Merging all segments...', progress: 99 })
+      this.emitProgress({ live_key: replay.live_key, status: 'merging', progress: 99, merge_progress: 0, message: 'Merging all segments...' })
 
-    await this.runFfmpegMerge(replay.live_key, allSegmentFiles, finalPath, expectedDuration, signal)
+      await this.runFfmpegMerge(replay.live_key, allSegmentFiles, finalPath, expectedDuration, signal)
 
-    for (const dir of streamDirs) {
+      for (const dir of streamDirs) {
         await fsp.rm(dir, { recursive: true, force: true })
       }
       return finalPath
