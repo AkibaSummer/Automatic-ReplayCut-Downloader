@@ -94,9 +94,15 @@ app.on('window-all-closed', () => {
   app.quit()
 })
 
-app.on('before-quit', () => {
-  if (backendStop) {
-    void backendStop()
-    backendStop = null
+let isQuitting = false
+
+app.on('before-quit', (e) => {
+  if (backendStop && !isQuitting) {
+    e.preventDefault()
+    isQuitting = true
+    backendStop().finally(() => {
+      backendStop = null
+      app.quit()
+    })
   }
 })

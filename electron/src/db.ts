@@ -110,12 +110,12 @@ export class SqliteStore {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
     }
-    if (this.dirty && !this.isFlushing) {
-      await this.flushNow()
-    }
-    // wait for flush if running
-    while (this.isFlushing) {
-      await new Promise(r => setTimeout(r, 50))
+    while (this.dirty || this.isFlushing) {
+      if (!this.isFlushing && this.dirty) {
+        await this.flushNow()
+      } else {
+        await new Promise(r => setTimeout(r, 50))
+      }
     }
     this.db.close()
   }
