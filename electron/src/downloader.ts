@@ -163,11 +163,21 @@ export class DownloaderService {
       }
     }
 
+    const localM3U8Path = path.join(this.config.download.temp_dir, `${replay.live_key}_local.m3u8`)
+    const playlist = ['#EXTM3U', '#EXT-X-VERSION:3', '#EXT-X-TARGETDURATION:10', '#EXT-X-MEDIA-SEQUENCE:0']
+    for (let i = 0; i < allSegmentFiles.length; i += 1) {
+      playlist.push(`#EXTINF:${(allSegmentDurations[i] || 10).toFixed(6)},`)
+      playlist.push(allSegmentFiles[i].replaceAll('\\', '/'))
+    }
+    playlist.push('#EXT-X-ENDLIST')
+    await fsp.writeFile(localM3U8Path, playlist.join('\n'), 'utf8')
+
     this.db.patchReplay(replay.live_key, { status: 'merging', message: 'Merging all segments...', progress: 99 })
     this.emitProgress({ live_key: replay.live_key, status: 'merging', progress: 99, merge_progress: 0, message: 'Merging all segments...' })
 
     await this.runFfmpegMerge(replay.live_key, allSegmentFiles, finalPath, expectedDuration, signal)
 
+      await fsp.rm(localM3U8Path, { force: true })
       for (const dir of streamDirs) {
         await fsp.rm(dir, { recursive: true, force: true })
       }
@@ -269,33 +279,47 @@ export class DownloaderService {
 
   private async remuxTsToMp4(tsPath: string, mp4Path: string, signal: AbortSignal) {
     const ffmpegBin = resolveFFmpegPath() || 'ffmpeg'
-    return new Promise<void>((resolve, reject) => {
-      const proc = spawn(ffmpegBin, [
-        '-i', tsPath,
-        '-c', 'copy',
-        '-movflags', '+faststart',
-        '-y', mp4Path
-      ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+    
+    const runFfmpeg = (extraArgs: string[]) => {
+      return new Promise<void>((resolve, reject) => {
+        const proc = spawn(ffmpegBin, [
+          '-i', tsPath,
+          '-c', 'copy',
+          '-movflags', '+faststart',
+          ...extraArgs,
+          '-y', mp4Path
+        ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 
-      let stderr = ''
-      proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
+        let stderr = ''
+        proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
 
-      const onAbort = () => {
-        proc.kill()
-        reject(new Error('aborted'))
+        const onAbort = () => {
+          proc.kill()
+          reject(new Error('aborted'))
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+
+        proc.on('close', (code) => {
+          signal.removeEventListener('abort', onAbort)
+          if (code === 0) resolve()
+          else reject(new Error(`ffmpeg remux failed: ${stderr.slice(-500)}`))
+        })
+        proc.on('error', (e) => {
+          signal.removeEventListener('abort', onAbort)
+          reject(e)
+        })
+      })
+    }
+
+    try {
+      await runFfmpeg([])
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('tag for codec hevc')) {
+        await runFfmpeg(['-tag:v', 'hvc1'])
+      } else {
+        throw err
       }
-      signal.addEventListener('abort', onAbort, { once: true })
-
-      proc.on('close', (code) => {
-        signal.removeEventListener('abort', onAbort)
-        if (code === 0) resolve()
-        else reject(new Error(`ffmpeg remux failed: ${stderr.slice(-500)}`))
-      })
-      proc.on('error', (e) => {
-        signal.removeEventListener('abort', onAbort)
-        reject(e)
-      })
-    })
+    }
   }
 
 
