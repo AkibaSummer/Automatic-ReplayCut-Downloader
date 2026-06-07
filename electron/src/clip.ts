@@ -275,7 +275,7 @@ export class ClipService {
         '-i', filePath,
         '-vf', 'select=eq(pict_type\\,I),showinfo',
         '-vsync', 'vfr', '-an', '-f', 'null', '-',
-      ], { stdio: ['ignore', 'pipe', 'pipe'] })
+      ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 
       let stderr = ''
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
@@ -298,7 +298,7 @@ export class ClipService {
   private probeFileDuration(filePath: string): Promise<number> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     return new Promise<number>((resolve) => {
-      const proc = spawn(ffmpegBin, ['-i', filePath, '-f', 'null', '-'], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const proc = spawn(ffmpegBin, ['-i', filePath, '-f', 'null', '-'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       let stderr = ''
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
       proc.on('close', () => {
@@ -318,7 +318,7 @@ export class ClipService {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     return new Promise((resolve, reject) => {
       console.log(`[ffmpeg] ${args.slice(0, 6).join(' ')} ...`)
-      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       let stderr = ''
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
       proc.on('close', (code) => {
@@ -338,7 +338,7 @@ export class ClipService {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     return new Promise((resolve, reject) => {
       console.log(`[ffmpeg] ${args.slice(0, 6).join(' ')} ...`)
-      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       let stderr = ''
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
 
@@ -367,7 +367,7 @@ export class ClipService {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     return new Promise((resolve, reject) => {
       console.log(`[ffmpeg] ${args.slice(0, 6).join(' ')} ...`)
-      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       let stderr = ''
       let buf = ''
       let lastUpdate = 0

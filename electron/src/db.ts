@@ -345,7 +345,7 @@ export class SqliteStore {
       next.status || 'not_downloaded',
       next.message || '',
       next.verify_ok ? 1 : 0,
-      next.actual_duration || 0,
+      (next as any).actual_dur ?? next.actual_duration ?? 0,
       new Date().toISOString(),
       liveKey,
     )

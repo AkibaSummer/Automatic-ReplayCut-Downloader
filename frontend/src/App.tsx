@@ -394,7 +394,7 @@ function App() {
     const toastId = notify ? showToast({ tone: 'loading', title: t('messages.refreshing') }) : null
     if (notify) setIsRefreshing(true)
     try {
-      const res = await apiClient.get('/api/replays')
+      const res = await apiClient.get('/api/replays', { params: { _t: Date.now() } })
       const list = (res.data || []) as Replay[]
       setReplays(list)
       setProgressMap(prev => {

@@ -161,6 +161,7 @@ class DesktopBackend {
 
     this.app.get('/api/replays', (_req, res) => {
       try {
+        res.setHeader('Cache-Control', 'no-store')
         res.json(this.db.getReplays(this.baseDir))
       } catch (error) {
         this.sendError(res, error)
@@ -478,7 +479,7 @@ class DesktopBackend {
             'pipe:1'
           ]
           console.log('[audio-proxy] spawning ffmpeg')
-          const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+          const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
           proc.stdout.pipe(res)
           proc.stderr.on('data', (d: Buffer) => {
             const msg = d.toString()
@@ -488,9 +489,12 @@ class DesktopBackend {
             console.error('[audio-proxy] spawn error:', err)
             if (!res.headersSent) res.status(500).json({ error: err.message })
           })
-          proc.on('close', (code: number) => {
-            if (code !== 0) console.error('[audio-proxy] ffmpeg exited with code', code)
+          proc.on('close', (code: number | null) => {
+            if (code !== 0 && code !== null) console.error('[audio-proxy] ffmpeg exited with code', code)
             res.end()
+          })
+          req.on('close', () => {
+            proc.kill()
           })
           return
         }
