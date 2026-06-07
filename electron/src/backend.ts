@@ -600,12 +600,22 @@ class DesktopBackend {
           res.status(400).json({ ok: false, message: 'filePath is required' })
           return
         }
-        const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
-        const { exec } = await import('node:child_process')
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          exec(`explorer /select,"${filePath}"`)
-        } else {
-          exec(`explorer "${dir}"`)
+        try {
+          const { shell } = require('electron')
+          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+            shell.showItemInFolder(filePath)
+          } else {
+            const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
+            await shell.openPath(dir)
+          }
+        } catch {
+          const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
+          const { exec } = await import('node:child_process')
+          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+            exec(`explorer /select,"${filePath.replace(/"/g, '')}"`)  
+          } else {
+            exec(`explorer "${dir.replace(/"/g, '')}"`)  
+          }
         }
         res.json({ ok: true })
       } catch (error) {
