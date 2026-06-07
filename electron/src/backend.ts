@@ -313,6 +313,11 @@ class DesktopBackend {
         if (target && fs.existsSync(target)) {
           await fsp.unlink(target)
         }
+        this.removeFromQueue(replay.live_key)
+        const active = this.activeTasks.get(replay.live_key)
+        if (active) {
+          active.controller.abort()
+        }
         this.db
           .prepare(
             `UPDATE bilibili_replays
@@ -763,6 +768,9 @@ class DesktopBackend {
       this.runningTasks += 1
       const promise = this.downloaderService.processReplayTask(liveKey, controller.signal, this.baseDir)
         .catch(error => {
+          if (error instanceof Error && error.message === 'aborted') {
+            return
+          }
           const message = error instanceof Error ? error.message : 'Unknown error'
           this.db.patchReplay(liveKey, { status: 'failed', message, speed: '', eta: '' })
           this.emitProgress({ live_key: liveKey, status: 'failed', progress: 0, message })
