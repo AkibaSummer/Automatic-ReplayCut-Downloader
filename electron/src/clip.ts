@@ -67,11 +67,11 @@ export class ClipService {
 
     const clipDir = resolveAppPathWithBase(this.baseDir, this.config.download.clip_output_dir || path.join(this.config.download.output_dir, 'clips'))
     ensureDir(clipDir)
-    const safeTitle = sanitizeFilename(title || info.title || 'clip')
+    let fileName = title || info.title || 'clip'
     const ts = `${formatSeconds(startTime)}-${formatSeconds(endTime)}`.replace(/:/g, '-')
-    let fileName = safeTitle
     if (prefixCut) fileName = `[cut] ${fileName}`
     if (suffixTime) fileName = `${fileName} (${ts})`
+    fileName = sanitizeFilename(fileName)
     const outPath = uniquePath(path.join(clipDir, `${fileName}.mp4`))
     fs.writeFileSync(outPath, '')
 

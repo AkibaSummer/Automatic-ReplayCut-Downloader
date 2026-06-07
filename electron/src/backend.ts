@@ -513,8 +513,13 @@ class DesktopBackend {
         res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
         res.setHeader('content-length', response.headers.get('content-length') || '')
         res.setHeader('accept-ranges', 'bytes')
-        const buffer = Buffer.from(await response.arrayBuffer())
-        res.send(buffer)
+        if (response.body) {
+          const { Readable } = require('node:stream')
+          Readable.fromWeb(response.body).pipe(res)
+        } else {
+          const buffer = Buffer.from(await response.arrayBuffer())
+          res.send(buffer)
+        }
       } catch (error) {
         this.sendError(res, error)
       }
