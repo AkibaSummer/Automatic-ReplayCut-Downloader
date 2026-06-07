@@ -73,6 +73,7 @@ export class ClipService {
     if (prefixCut) fileName = `[cut] ${fileName}`
     if (suffixTime) fileName = `${fileName} (${ts})`
     const outPath = uniquePath(path.join(clipDir, `${fileName}.mp4`))
+    fs.writeFileSync(outPath, '')
 
     const cookie = this.bilibiliClient.cookieHeader()
     const headers = `Referer: https://live.bilibili.com/\r\nUser-Agent: ${USER_AGENT}\r\nCookie: ${cookie}\r\n`
@@ -91,6 +92,11 @@ export class ClipService {
       } else {
         result = await this.localReencode(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress)
       }
+    } catch (err) {
+      if (fs.existsSync(outPath) && fs.statSync(outPath).size === 0) {
+        fs.unlinkSync(outPath)
+      }
+      throw err
     } finally {
       await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {})
     }

@@ -146,7 +146,9 @@ class DesktopBackend {
         const next = deepMerge(this.config, incoming)
         next.server = previous.server
         next.database = previous.database
-        this.config = normalizeConfigWithBase(this.baseDir, next)
+        const normalized = normalizeConfigWithBase(this.baseDir, next)
+        for (const key of Object.keys(this.config)) delete (this.config as any)[key]
+        Object.assign(this.config, normalized)
         ensureDir(this.config.download.output_dir)
         ensureDir(this.config.download.temp_dir)
         ensureDir(path.join(this.config.download.output_dir, 'covers'))
