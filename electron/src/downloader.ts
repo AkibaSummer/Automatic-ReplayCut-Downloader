@@ -94,10 +94,12 @@ export class DownloaderService {
     }
     let finalPath = path.join(this.config.download.output_dir, finalFilename)
     finalPath = uniquePath(finalPath)
+    fs.writeFileSync(finalPath, '')
 
-    const startAt = Date.now()
-    const speedHistory: number[] = []
-    let downloadedBytes = 0
+    try {
+      const startAt = Date.now()
+      const speedHistory: number[] = []
+      let downloadedBytes = 0
     let doneSegments = 0
     let totalSegments = 0
     let expectedDuration = 0
@@ -170,11 +172,17 @@ export class DownloaderService {
 
     await this.runFfmpegMerge(replay.live_key, localM3U8Path, finalPath, expectedDuration, signal)
 
-    await fsp.rm(localM3U8Path, { force: true })
-    for (const dir of streamDirs) {
-      await fsp.rm(dir, { recursive: true, force: true })
+      await fsp.rm(localM3U8Path, { force: true })
+      for (const dir of streamDirs) {
+        await fsp.rm(dir, { recursive: true, force: true })
+      }
+      return finalPath
+    } catch (err) {
+      if (fs.existsSync(finalPath) && fs.statSync(finalPath).size === 0) {
+        fs.unlinkSync(finalPath)
+      }
+      throw err
     }
-    return finalPath
   }
 
   private async downloadSegment(url: string, targetPath: string, signal: AbortSignal) {

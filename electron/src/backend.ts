@@ -768,7 +768,7 @@ class DesktopBackend {
       this.runningTasks += 1
       const promise = this.downloaderService.processReplayTask(liveKey, controller.signal, this.baseDir)
         .catch(error => {
-          if (error instanceof Error && error.message === 'aborted') {
+          if (error instanceof Error && (error.message === 'aborted' || error.name === 'AbortError')) {
             return
           }
           const message = error instanceof Error ? error.message : 'Unknown error'
