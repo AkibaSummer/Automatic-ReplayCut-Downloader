@@ -427,18 +427,18 @@ export class ClipService {
       '-c', 'copy', '-y', concatVideoPath
     ], signal)
 
-    // ── Step 4: Re-encode Audio Global ──
-    onProgress?.(80, '处理无损音频轨...')
+    // ── Step 4: Extract Audio Global ──
+    onProgress?.(80, '提取原始音频轨...')
     const audioPath = path.join(tempDir, 'audio.m4a')
-    await this.runFfmpegWithEncodingProgress(
+    await this.runFfmpegWithFileProgress(
       [
-        ...(audioUrl ? ['-ss', `${startTime}`, '-headers', headers, '-i', audioUrl] : []),
+        ...(audioUrl ? ['-ss', `${startTime}`, '-headers', headers, '-i', audioUrl] : ['-ss', `${relStart}`, '-i', rawVideoPath]),
         '-t', `${totalDuration}`,
-        '-c:a', 'aac', '-b:a', '320k',
+        '-c:a', 'copy',
         '-y', audioPath
       ],
-      totalDuration,
-      (pct, msg) => onProgress?.(80 + pct * 15, `处理音频: ${msg}`),
+      audioPath,
+      (sizeMB) => onProgress?.(Math.min(94, 80 + sizeMB * 5), `提取音频: ${sizeMB.toFixed(1)} MB`),
       signal
     )
 
