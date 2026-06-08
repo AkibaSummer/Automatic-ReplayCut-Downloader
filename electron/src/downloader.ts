@@ -27,14 +27,12 @@ export class DownloaderService {
     let replay = this.db.getReplayByLiveKey(baseDir, liveKey)
     if (!replay) return
 
-    if (replay.streams.length === 0) {
-      this.db.patchReplay(liveKey, { status: 'pending', message: 'Fetching stream list...' })
-      this.emitProgress({ live_key: liveKey, status: 'pending', progress: replay.progress, message: 'Fetching stream list...' })
-      await this.bilibiliClient.cacheReplayM3U8(replay)
-      replay = this.db.getReplayByLiveKey(baseDir, liveKey)
-      if (!replay || replay.streams.length === 0) {
-        throw new Error('No streams found for replay')
-      }
+    this.db.patchReplay(liveKey, { status: 'pending', message: 'Fetching stream list...' })
+    this.emitProgress({ live_key: liveKey, status: 'pending', progress: replay.progress, message: 'Fetching stream list...' })
+    await this.bilibiliClient.cacheReplayM3U8(replay)
+    replay = this.db.getReplayByLiveKey(baseDir, liveKey)
+    if (!replay || replay.streams.length === 0) {
+      throw new Error('No streams found for replay')
     }
 
     this.db.patchReplay(liveKey, {
@@ -99,6 +97,7 @@ export class DownloaderService {
     }
     let finalPath = path.join(this.config.download.output_dir, finalFilename)
     finalPath = uniquePath(finalPath)
+    fs.mkdirSync(path.dirname(finalPath), { recursive: true })
     fs.writeFileSync(finalPath, '')
 
     try {
@@ -240,8 +239,8 @@ export class DownloaderService {
       }
       return finalPath
     } catch (err) {
-      if (fs.existsSync(finalPath) && fs.statSync(finalPath).size === 0) {
-        fs.unlinkSync(finalPath)
+      if (fs.existsSync(finalPath)) {
+        try { fs.unlinkSync(finalPath) } catch (e) { console.error('Failed to unlink finalPath on error', e) }
       }
       throw err
     }
@@ -361,15 +360,19 @@ export class DownloaderService {
         proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
 
         const onAbort = () => {
-          proc.kill()
-          reject(new Error('aborted'))
+          proc.kill('SIGTERM')
         }
         signal.addEventListener('abort', onAbort, { once: true })
 
         proc.on('close', (code) => {
           signal.removeEventListener('abort', onAbort)
-          if (code === 0) resolve()
-          else reject(new Error(`ffmpeg remux failed: ${stderr.slice(-500)}`))
+          if (signal.aborted) {
+            reject(new Error('aborted'))
+          } else if (code === 0) {
+            resolve()
+          } else {
+            reject(new Error(`ffmpeg remux failed: ${stderr.slice(-500)}`))
+          }
         })
         proc.on('error', (e) => {
           signal.removeEventListener('abort', onAbort)

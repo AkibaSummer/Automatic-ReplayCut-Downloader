@@ -20,7 +20,10 @@ function normalizeSqlParams(paramsRaw: unknown[]) {
       }
       return mapped as BindParams
     }
-    return single as BindParams
+    if (Array.isArray(single)) {
+      return single as BindParams
+    }
+    return [single] as BindParams
   }
   return paramsRaw as unknown as BindParams
 }

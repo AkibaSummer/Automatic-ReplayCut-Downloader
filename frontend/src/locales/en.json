@@ -65,6 +65,8 @@
     "clipMode": "Clip Mode",
     "modeCopy": "🚀 Stream Copy (Recommended, Fastest)",
     "modeCopyDesc": "Zero re-encoding, zero stutter. Start aligns to keyframe (up to ~5s early), end is precise",
+    "modeSmart": "Smart Cut (Recommended)",
+    "modeSmartDesc": "Frame-accurate via re-encoding head/tail, extremely fast stream copy in the middle.",
     "modeReencode": "🎯 Full Re-encode (Most precise)",
     "modeReencodeDesc": "CRF 18 + AAC 512k, frame accurate, zero stutter, slower",
     "confirm": "Confirm",

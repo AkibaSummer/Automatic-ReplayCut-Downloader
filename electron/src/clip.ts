@@ -19,7 +19,7 @@ if (ffmpegResolved) {
   ffmpeg.setFfmpegPath(ffmpegResolved)
 }
 
-export type ClipMode = 'copy' | 'reencode'
+export type ClipMode = 'copy' | 'reencode' | 'smart'
 export type ClipProgressCallback = (progress: number, message?: string) => void
 
 export class ClipService {
@@ -34,7 +34,7 @@ export class ClipService {
     audioQualityIndex: number = 0, videoQualityIndex: number = 0,
     onProgress?: ClipProgressCallback,
     prefixCut: boolean = true, suffixTime: boolean = true,
-    clipMode: ClipMode = 'copy',
+    clipMode: ClipMode = 'copy', signal?: AbortSignal
   ) {
     if (startTime < 0) startTime = 0
     if (endTime <= startTime) throw new Error('结束时间必须大于开始时间')
@@ -87,10 +87,12 @@ export class ClipService {
     const tempDir = path.join(this.config.download.temp_dir, `clip_${Date.now()}`)
     ensureDir(tempDir)
     try {
-      if (clipMode === 'copy') {
-        result = await this.localCopyCut(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress)
+      if (clipMode === 'smart') {
+        result = await this.localSmartCut(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress, signal)
+      } else if (clipMode === 'copy') {
+        result = await this.localCopyCut(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress, signal)
       } else {
-        result = await this.localReencode(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress)
+        result = await this.localReencode(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress, signal)
       }
     } catch (err) {
       if (fs.existsSync(outPath) && fs.statSync(outPath).size === 0) {
@@ -117,7 +119,7 @@ export class ClipService {
   private async localCopyCut(
     videoUrl: string, audioUrl: string, headers: string,
     startTime: number, endTime: number, outPath: string,
-    tempDir: string, onProgress?: ClipProgressCallback,
+    tempDir: string, onProgress?: ClipProgressCallback, signal?: AbortSignal
   ): Promise<{ size: number; message?: string }> {
     const totalDuration = endTime - startTime
     const PADDING = 15 // seconds before startTime to ensure we capture the keyframe
@@ -201,7 +203,7 @@ export class ClipService {
   private async localReencode(
     videoUrl: string, audioUrl: string, headers: string,
     startTime: number, endTime: number, outPath: string,
-    tempDir: string, onProgress?: ClipProgressCallback,
+    tempDir: string, onProgress?: ClipProgressCallback, signal?: AbortSignal
   ): Promise<{ size: number; message?: string }> {
     const totalDuration = endTime - startTime
     const PADDING = 15
@@ -270,6 +272,175 @@ export class ClipService {
 
 
   // ═══════════════════════════════════════════════════════════════
+  // Mode 3: Smart Cut — Frame-accurate cuts with no re-encoding of body
+  // ═══════════════════════════════════════════════════════════════
+
+  private async localSmartCut(
+    videoUrl: string, audioUrl: string, headers: string,
+    startTime: number, endTime: number, outPath: string,
+    tempDir: string, onProgress?: ClipProgressCallback, signal?: AbortSignal
+  ): Promise<{ size: number; message?: string }> {
+    const totalDuration = endTime - startTime
+    const PADDING = 15
+
+    // ── Step 1: Download raw clip ──
+    const paddedStart = Math.max(0, startTime - PADDING)
+    const paddedDuration = totalDuration + PADDING + 10
+    const rawVideoPath = path.join(tempDir, 'raw_video.mp4')
+    
+    onProgress?.(1, '下载中...')
+    console.log(`[smart] Step 1: Download raw video [${paddedStart}s, +${paddedDuration}s]`)
+    await this.runFfmpegWithFileProgress(
+      [
+        ...(videoUrl ? ['-ss', `${paddedStart}`, '-headers', headers, '-i', videoUrl] : []),
+        '-t', `${paddedDuration}`,
+        '-c', 'copy',
+        '-avoid_negative_ts', 'make_zero',
+        '-y', rawVideoPath,
+      ],
+      rawVideoPath,
+      (sizeMB) => onProgress?.(Math.min(29, 1 + sizeMB * 0.3), `下载视频... ${sizeMB.toFixed(1)} MB`),
+      signal
+    )
+
+    if (!fs.existsSync(rawVideoPath) || fs.statSync(rawVideoPath).size === 0) {
+      throw new Error('下载失败：视频临时文件为空')
+    }
+
+    // ── Step 2: Extract Keyframes ──
+    onProgress?.(30, '分析关键帧...')
+    const keyframes = await this.findKeyframes(rawVideoPath)
+    const gop = keyframes.length >= 2 ? keyframes[1] - keyframes[0] : 5
+    const seekOffset = gop > 0 ? (paddedStart % gop) : 0
+    
+    // Convert absolute user time to relative time in our padded raw file
+    const relStart = (startTime - paddedStart) + seekOffset
+    const relEnd = (endTime - paddedStart) + seekOffset
+
+    // Find bounding keyframes for the body
+    const KF_TOLERANCE = 0.05
+    let k1 = keyframes.find(kf => kf >= relStart - KF_TOLERANCE)
+    let k2 = [...keyframes].reverse().find(kf => kf <= relEnd + KF_TOLERANCE)
+    
+    if (k1 === undefined) k1 = relEnd
+    if (k2 === undefined) k2 = relStart
+
+    console.log(`[smart] relStart=${relStart.toFixed(2)}, k1=${k1.toFixed(2)}, k2=${k2.toFixed(2)}, relEnd=${relEnd.toFixed(2)}`)
+
+    const tsFiles: string[] = []
+    
+    // We will use standard H.264 matching parameters for re-encoding head and tail
+    const reencodeFlags = [
+      '-c:v', 'libx264', '-crf', '18', '-preset', 'fast',
+      '-profile:v', 'high', '-level', '4.1', '-pix_fmt', 'yuv420p',
+      '-vsync', '1', '-async', '1',
+      // Very important to make the TS files concatenable without glitches
+      '-bsf:v', 'h264_mp4toannexb', '-f', 'mpegts'
+    ]
+    const copyFlags = ['-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-f', 'mpegts']
+
+    // Is the clip too short to have a body?
+    if (k2 <= k1) {
+      console.log(`[smart] Clip too short or no keyframes inside, full re-encode used.`)
+      const headTs = path.join(tempDir, 'head.ts')
+      onProgress?.(40, '重编码纯视频...')
+      await this.runFfmpegWithEncodingProgress(
+        ['-i', rawVideoPath, '-ss', `${relStart}`, '-t', `${totalDuration}`, '-an', ...reencodeFlags, '-y', headTs],
+        totalDuration,
+        (pct, msg) => onProgress?.(40 + pct * 20, `重编码: ${msg}`),
+        signal
+      )
+      tsFiles.push(headTs)
+    } else {
+      // ── Head ──
+      if (k1 > relStart + 0.1) {
+        const headDur = k1 - relStart
+        const headTs = path.join(tempDir, 'head.ts')
+        console.log(`[smart] Head: ${relStart.toFixed(2)} -> ${k1.toFixed(2)} (${headDur.toFixed(2)}s)`)
+        onProgress?.(40, '重编码头部视频...')
+        await this.runFfmpegWithEncodingProgress(
+          ['-i', rawVideoPath, '-ss', `${relStart}`, '-t', `${headDur}`, '-an', ...reencodeFlags, '-y', headTs],
+          headDur,
+          (pct, msg) => onProgress?.(40 + pct * 5, `重编码头: ${msg}`),
+          signal
+        )
+        tsFiles.push(headTs)
+      }
+
+      // ── Body ──
+      const bodyDur = k2 - k1
+      if (bodyDur > 0) {
+        const bodyTs = path.join(tempDir, 'body.ts')
+        console.log(`[smart] Body: ${k1.toFixed(2)} -> ${k2.toFixed(2)} (${bodyDur.toFixed(2)}s)`)
+        onProgress?.(50, '流复制中间视频...')
+        await this.runFfmpegCommand(
+          ['-ss', `${k1}`, '-i', rawVideoPath, '-t', `${bodyDur}`, '-an', ...copyFlags, '-y', bodyTs],
+          signal
+        )
+        tsFiles.push(bodyTs)
+      }
+
+      // ── Tail ──
+      if (relEnd > k2 + 0.1) {
+        const tailDur = relEnd - k2
+        const tailTs = path.join(tempDir, 'tail.ts')
+        console.log(`[smart] Tail: ${k2.toFixed(2)} -> ${relEnd.toFixed(2)} (${tailDur.toFixed(2)}s)`)
+        onProgress?.(60, '重编码尾部视频...')
+        await this.runFfmpegWithEncodingProgress(
+          ['-ss', `${k2}`, '-i', rawVideoPath, '-t', `${tailDur}`, '-an', ...reencodeFlags, '-y', tailTs],
+          tailDur,
+          (pct, msg) => onProgress?.(60 + pct * 5, `重编码尾: ${msg}`),
+          signal
+        )
+        tsFiles.push(tailTs)
+      }
+    }
+
+    // ── Step 3: Concat Video ──
+    onProgress?.(70, '合并视频段...')
+    const concatVideoPath = path.join(tempDir, 'concat_video.mp4')
+    const tsList = tsFiles.map(f => `file '${f.replace(/\\/g, '/')}'`).join('\n')
+    const listPath = path.join(tempDir, 'list.txt')
+    fs.writeFileSync(listPath, tsList)
+    
+    await this.runFfmpegCommand([
+      '-f', 'concat', '-safe', '0', '-i', listPath,
+      '-c', 'copy', '-y', concatVideoPath
+    ], signal)
+
+    // ── Step 4: Re-encode Audio Global ──
+    onProgress?.(80, '处理无损音频轨...')
+    const audioPath = path.join(tempDir, 'audio.m4a')
+    await this.runFfmpegWithEncodingProgress(
+      [
+        ...(audioUrl ? ['-ss', `${startTime}`, '-headers', headers, '-i', audioUrl] : []),
+        '-t', `${totalDuration}`,
+        '-c:a', 'aac', '-b:a', '320k',
+        '-y', audioPath
+      ],
+      totalDuration,
+      (pct, msg) => onProgress?.(80 + pct * 15, `处理音频: ${msg}`),
+      signal
+    )
+
+    // ── Step 5: Final Mux ──
+    onProgress?.(95, '最终合成混流...')
+    await this.runFfmpegCommand([
+      '-i', concatVideoPath,
+      '-i', audioPath,
+      '-c', 'copy',
+      '-shortest',
+      '-movflags', '+faststart',
+      '-y', outPath
+    ], signal)
+
+    onProgress?.(100, '智能无损切片完成')
+    const size = fs.existsSync(outPath) ? fs.statSync(outPath).size : 0
+    return { size, message: '智能极速完成（帧精确+原画质）' }
+  }
+
+
+  // ═══════════════════════════════════════════════════════════════
   // FFmpeg Helpers
   // ═══════════════════════════════════════════════════════════════
 
@@ -320,18 +491,12 @@ export class ClipService {
     })
   }
 
-  private runFfmpegCommand(args: string[]): Promise<void> {
+  private runFfmpegCommand(args: string[], signal?: AbortSignal): Promise<void> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     
     const run = (extraArgs: string[]) => {
       return new Promise<void>((resolve, reject) => {
-        const fullArgs = args.slice(0, args.length - 2).concat(extraArgs).concat(args.slice(args.length - 2))
-        if (extraArgs.length > 0 && !fullArgs.includes('-y')) {
-           // fallback just in case
-        }
-        // Actually, just inject extraArgs before the last argument (output file) and -y
-        // A safer way is to just push extraArgs before the output path. The last arg is the output path.
-        // Usually args ends with '-y', outPath.
+        if (signal?.aborted) return reject(new Error('aborted'))
         let finalArgs = [...args]
         if (extraArgs.length > 0) {
           const outPath = finalArgs.pop()!
@@ -347,13 +512,24 @@ export class ClipService {
         const proc = spawn(ffmpegBin, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
         let stderr = ''
         proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
+
+        const onAbort = () => {
+          proc.kill('SIGTERM')
+          reject(new Error('aborted'))
+        }
+        signal?.addEventListener('abort', onAbort, { once: true })
+
         proc.on('close', (code) => {
+          signal?.removeEventListener('abort', onAbort)
           if (code !== 0) {
             console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
             reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
           } else resolve()
         })
-        proc.on('error', (e) => reject(new Error(`FFmpeg 启动失败: ${e.message}`)))
+        proc.on('error', (e) => {
+          signal?.removeEventListener('abort', onAbort)
+          reject(new Error(`FFmpeg 启动失败: ${e.message}`))
+        })
       })
     }
 
@@ -417,10 +593,11 @@ export class ClipService {
   /** Run ffmpeg with encoding progress parsed from -progress pipe:1 */
   private runFfmpegWithEncodingProgress(
     args: string[], expectedDuration: number,
-    onProgress: (pct: number, message: string) => void,
+    onProgress: (pct: number, message: string) => void, signal?: AbortSignal
   ): Promise<void> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error('aborted'))
       console.log(`[ffmpeg] ${args.slice(0, 6).join(' ')} ...`)
       const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       let stderr = ''
@@ -448,14 +625,24 @@ export class ClipService {
         }
       })
 
+      const onAbort = () => {
+        proc.kill('SIGTERM')
+        reject(new Error('aborted'))
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
       proc.on('close', (code) => {
+        signal?.removeEventListener('abort', onAbort)
         if (code !== 0) {
           console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
           reject(new Error(`FFmpeg 编码失败 (code ${code}): ${stderr.slice(-300)}`))
         } else resolve()
       })
-      proc.on('error', (e) => reject(new Error(`FFmpeg 启动失败: ${e.message}`)))
+      proc.on('error', (e) => {
+        signal?.removeEventListener('abort', onAbort)
+        reject(new Error(`FFmpeg 启动失败: ${e.message}`))
+      })
     })
   }
 }

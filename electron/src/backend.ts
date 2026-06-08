@@ -320,6 +320,18 @@ class DesktopBackend {
         if (active) {
           active.controller.abort()
         }
+        try {
+          const tempDir = this.config.download.temp_dir
+          if (fs.existsSync(tempDir)) {
+            const files = fs.readdirSync(tempDir)
+            const prefix = `${replay.live_key}_stream`
+            for (const f of files) {
+              if (f.startsWith(prefix)) {
+                await fsp.rm(path.join(tempDir, f), { recursive: true, force: true }).catch(() => {})
+              }
+            }
+          }
+        } catch {}
         this.db
           .prepare(
             `UPDATE bilibili_replays
@@ -547,6 +559,9 @@ class DesktopBackend {
 
         res.json({ taskId, status: 'pending' })
 
+        const controller = new AbortController()
+        this.clipTasksAbort.set(taskId, controller)
+
         // Execute in background
         this.clipService.executeClip(
           url, title, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
@@ -557,17 +572,31 @@ class DesktopBackend {
           prefixCut !== false,
           suffixTime !== false,
           clipMode || 'copy',
+          controller.signal
         ).then(result => {
+          this.clipTasksAbort.delete(taskId)
           const r = result as { path: string; message?: string }
           this.db.updateClipTask(taskId, { progress: 100, status: 'done', file_path: r.path, message: r.message || '' })
           this.emitClipTaskUpdate(taskId)
         }).catch(error => {
+          this.clipTasksAbort.delete(taskId)
           this.db.updateClipTask(taskId, { status: 'error', message: error.message })
           this.emitClipTaskUpdate(taskId)
         })
 
       } catch (error) {
         this.sendError(res, error)
+      }
+    })
+
+    this.app.post('/api/clip/cancel/:taskId', (req, res) => {
+      const taskId = Number(req.params.taskId)
+      const controller = this.clipTasksAbort.get(taskId)
+      if (controller) {
+        controller.abort()
+        res.json({ ok: true })
+      } else {
+        res.status(404).json({ error: 'Task not found or already finished' })
       }
     })
 
@@ -705,6 +734,9 @@ class DesktopBackend {
 
   // ──────────────────────── Runtime / Queue ────────────────────────
 
+  private updateProgressDebounced: Record<string, NodeJS.Timeout> = {}
+  private clipTasksAbort = new Map<number, AbortController>()
+
   private getRuntime(): RuntimeSnapshot {
     const counts = this.db
       .prepare(
@@ -785,30 +817,50 @@ class DesktopBackend {
 
   private scheduleQueue() {
     while (!this.runtimePaused && this.runningTasks < this.config.download.max_concurrent_tasks && this.queue.length > 0) {
-      const liveKey = this.queue.shift()
-      if (!liveKey) break
-      if (this.activeTasks.has(liveKey) || this.pausedTasks.has(liveKey)) {
-        continue
+      let foundIndex = -1
+      let targetKey: string | null = null
+
+      for (let i = 0; i < this.queue.length; i++) {
+        const key = this.queue[i]
+        if (this.pausedTasks.has(key)) {
+          this.queue.splice(i, 1)
+          i--
+          continue
+        }
+        if (this.activeTasks.has(key)) {
+          continue // Winding down, leave in queue for later
+        }
+        foundIndex = i
+        targetKey = key
+        break
       }
-      const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
-      if (!replay) continue
-      const controller = new AbortController()
-      this.runningTasks += 1
-      const promise = this.downloaderService.processReplayTask(liveKey, controller.signal, this.baseDir)
-        .catch(error => {
-          if (error instanceof Error && (error.message === 'aborted' || error.name === 'AbortError')) {
-            return
-          }
-          const message = error instanceof Error ? error.message : 'Unknown error'
-          this.db.patchReplay(liveKey, { status: 'failed', message, speed: '', eta: '' })
-          this.emitProgress({ live_key: liveKey, status: 'failed', progress: 0, message })
-        })
-        .finally(() => {
-          this.runningTasks = Math.max(0, this.runningTasks - 1)
-          this.activeTasks.delete(liveKey)
-          this.scheduleQueue()
-        })
-      this.activeTasks.set(liveKey, { controller, promise })
+
+      if (foundIndex !== -1 && targetKey) {
+        this.queue.splice(foundIndex, 1)
+        const liveKey = targetKey
+        
+        const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
+        if (!replay) continue
+        const controller = new AbortController()
+        this.runningTasks += 1
+        const promise = this.downloaderService.processReplayTask(liveKey, controller.signal, this.baseDir)
+          .catch(error => {
+            if (error instanceof Error && (error.message === 'aborted' || error.name === 'AbortError')) {
+              return
+            }
+            const message = error instanceof Error ? error.message : 'Unknown error'
+            this.db.patchReplay(liveKey, { status: 'failed', message, speed: '', eta: '' })
+            this.emitProgress({ live_key: liveKey, status: 'failed', progress: 0, message })
+          })
+          .finally(() => {
+            this.runningTasks = Math.max(0, this.runningTasks - 1)
+            this.activeTasks.delete(liveKey)
+            this.scheduleQueue()
+          })
+        this.activeTasks.set(liveKey, { controller, promise })
+      } else {
+        break
+      }
     }
   }
 

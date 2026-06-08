@@ -67,7 +67,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   const [clipTitle, setClipTitle] = useState('')
   const [clipPrefixCut, setClipPrefixCut] = useState(true)
   const [clipSuffixTime, setClipSuffixTime] = useState(true)
-  const [clipMode, setClipMode] = useState<'copy' | 'reencode'>('copy')
+  const [clipMode, setClipMode] = useState<'copy' | 'reencode' | 'smart'>('smart')
 
   // --- Feishu song list state ---
   const [feishuOpen, setFeishuOpen] = useState(false)
@@ -1149,9 +1149,21 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                 <div key={task.id} className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm flex flex-col gap-2">
                   <div className="flex justify-between items-center">
                     <span className="text-sm font-medium text-slate-800 truncate pr-2">{task.title}</span>
-                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${task.status === 'done' ? 'bg-green-100 text-green-700' : task.status === 'error' ? 'bg-red-100 text-red-700' : 'bg-[var(--color-bili-blue)] text-white'}`}>
-                      {task.status}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {(task.status === 'processing' || task.status === 'pending') && (
+                        <button
+                          onClick={() => {
+                            apiClient.post(`/api/clip/cancel/${task.id}`).catch(() => {})
+                          }}
+                          className="text-[10px] text-slate-500 hover:text-red-500 hover:underline px-1 cursor-pointer"
+                        >
+                          {t('clipTask.cancel') || 'Cancel'}
+                        </button>
+                      )}
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${task.status === 'done' ? 'bg-green-100 text-green-700' : task.status === 'error' ? 'bg-red-100 text-red-700' : 'bg-[var(--color-bili-blue)] text-white'}`}>
+                        {task.status}
+                      </span>
+                    </div>
                   </div>
                   {(task.status === 'processing' || task.status === 'pending') && (
                     <>
@@ -1251,6 +1263,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                 <label className="block text-sm font-medium text-slate-700 mb-2">{t('clipTask.clipMode')}</label>
                 <div className="space-y-2">
                   {[
+                    { value: 'smart' as const, label: t('clipTask.modeSmart') || 'Smart Cut', desc: t('clipTask.modeSmartDesc') || 'Fast & precise (recommended)' },
                     { value: 'copy' as const, label: t('clipTask.modeCopy'), desc: t('clipTask.modeCopyDesc') },
                     { value: 'reencode' as const, label: t('clipTask.modeReencode'), desc: t('clipTask.modeReencodeDesc') },
                   ].map(opt => (
