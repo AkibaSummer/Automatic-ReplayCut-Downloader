@@ -325,12 +325,12 @@ export class DownloaderService {
               return
             }
             const rs = createReadStream(fullPath)
-            rs.on('data', (chunk: string | Buffer) => {
-              written += chunk.length
-              const mergeProgress = totalBytes > 0 ? Math.max(0, Math.min(100, (written / totalBytes) * 100)) : 0
-              this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: mergeProgress, message: `Merging... ${Math.round(mergeProgress)}%` })
-            })
-            rs.on('end', () => appendNext(idx + 1))
+          rs.on('data', (chunk: string | Buffer) => {
+            written += chunk.length
+            const mergeProgress = totalBytes > 0 ? Math.max(0, Math.min(100, (written / totalBytes) * 100)) : 0
+            this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: mergeProgress, message: `合并临时碎片... ${Math.round(mergeProgress)}%` })
+          })
+          rs.on('end', () => appendNext(idx + 1))
             rs.on('error', reject)
             rs.pipe(outStream, { end: false })
           }
@@ -342,14 +342,16 @@ export class DownloaderService {
 
       if (signal.aborted) return
   
-      this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: 100, message: '转换MP4格式中 (大文件可能需要几分钟)...' })
-      await this.remuxTsToMp4(tempPath, outputPath, signal)
-    } finally {
+    this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: 0, message: '转换MP4格式中 (0%)...' })
+    await this.remuxTsToMp4(tempPath, outputPath, signal, (pct) => {
+      this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: pct, message: `转换MP4格式中 (${pct}%)...` })
+    }, expectedSeconds)
+  } finally {
       await fsp.rm(tempPath, { force: true }).catch(() => {})
     }
   }
 
-  private async remuxTsToMp4(tsPath: string, mp4Path: string, signal: AbortSignal) {
+  private async remuxTsToMp4(tsPath: string, mp4Path: string, signal: AbortSignal, onProgress?: (pct: number) => void, expectedSeconds?: number) {
     const ffmpegBin = resolveFFmpegPath() || 'ffmpeg'
     
     const runFfmpeg = (extraArgs: string[]) => {
@@ -363,7 +365,22 @@ export class DownloaderService {
         ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 
         let stderr = ''
-        proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
+        proc.stderr.on('data', (c: Buffer) => { 
+          const chunkStr = c.toString()
+          stderr += chunkStr
+          
+          if (onProgress && expectedSeconds && expectedSeconds > 0) {
+            const match = stderr.slice(-1000).match(/time=(\d{2}):(\d{2}):(\d{2}\.\d{2})/)
+            if (match) {
+              const h = parseInt(match[1], 10)
+              const m = parseInt(match[2], 10)
+              const s = parseFloat(match[3])
+              const currentSec = h * 3600 + m * 60 + s
+              const pct = Math.min(100, Math.max(0, Math.round((currentSec / expectedSeconds) * 100)))
+              onProgress(pct)
+            }
+          }
+        })
 
         const onAbort = () => {
           proc.kill('SIGTERM')
