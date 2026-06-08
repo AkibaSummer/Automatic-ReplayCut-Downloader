@@ -102,6 +102,7 @@ export class DownloaderService {
 
     try {
       const startAt = Date.now()
+      let lastDbPatchAt = 0
       const speedHistory: number[] = []
       let downloadedBytes = 0
       let doneSegments = 0
@@ -175,14 +176,18 @@ export class DownloaderService {
                 const elapsed = this.formatElapsed(elapsedSeconds)
                 const etaSeconds = speedMb <= 0 ? 0 : ((totalSegments - doneSegments) * elapsedSeconds) / Math.max(1, doneSegments)
                 
-                this.db.patchReplay(replay.live_key, {
-                  progress,
-                  speed: `${speedMb.toFixed(2)} MB/s`,
-                  elapsed,
-                  eta: etaSeconds > 0 ? this.formatElapsed(etaSeconds) : '',
-                  status: 'downloading',
-                  message: `Stream ${streamIdx + 1}/${streams.length}, Segment ${i + 1}/${segments.length}`,
-                })
+                if (Date.now() - lastDbPatchAt > 10000) {
+                  lastDbPatchAt = Date.now()
+                  this.db.patchReplay(replay.live_key, {
+                    progress,
+                    speed: `${speedMb.toFixed(2)} MB/s`,
+                    elapsed,
+                    eta: etaSeconds > 0 ? this.formatElapsed(etaSeconds) : '',
+                    status: 'downloading',
+                    message: `Stream ${streamIdx + 1}/${streams.length}, Segment ${i + 1}/${segments.length}`,
+                  })
+                }
+
                 this.emitProgress({
                   live_key: replay.live_key,
                   status: 'downloading',
@@ -336,7 +341,8 @@ export class DownloaderService {
       }
 
       if (signal.aborted) return
-
+  
+      this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: 100, message: '转换MP4格式中 (大文件可能需要几分钟)...' })
       await this.remuxTsToMp4(tempPath, outputPath, signal)
     } finally {
       await fsp.rm(tempPath, { force: true }).catch(() => {})
