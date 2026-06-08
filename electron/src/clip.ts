@@ -544,11 +544,13 @@ export class ClipService {
   /** Run ffmpeg with file-size-based progress polling (for copy-mode ops) */
   private runFfmpegWithFileProgress(
     args: string[], outputPath: string, onSize: (sizeMB: number) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     
     const run = (extraArgs: string[]) => {
       return new Promise<void>((resolve, reject) => {
+        if (signal?.aborted) return reject(new Error('aborted'))
         let finalArgs = [...args]
         if (extraArgs.length > 0) {
           const outPath = finalArgs.pop()!
@@ -571,14 +573,25 @@ export class ClipService {
           } catch {}
         }, 1000)
 
+        const onAbort = () => {
+          proc.kill('SIGTERM')
+          reject(new Error('aborted'))
+        }
+        signal?.addEventListener('abort', onAbort, { once: true })
+
         proc.on('close', (code) => {
           clearInterval(timer)
+          signal?.removeEventListener('abort', onAbort)
           if (code !== 0) {
             console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
             reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
           } else resolve()
         })
-        proc.on('error', (e) => { clearInterval(timer); reject(new Error(`FFmpeg 启动失败: ${e.message}`)) })
+        proc.on('error', (e) => { 
+          clearInterval(timer)
+          signal?.removeEventListener('abort', onAbort)
+          reject(new Error(`FFmpeg 启动失败: ${e.message}`)) 
+        })
       })
     }
 
