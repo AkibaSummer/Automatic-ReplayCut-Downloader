@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import fsp from 'node:fs/promises'
+
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { AppConfig } from './types'
@@ -338,8 +338,7 @@ export class ClipService {
       // Very important to make the TS files concatenable without glitches
       '-bsf:v', 'h264_mp4toannexb', '-f', 'mpegts'
     ]
-    const copyFlags = ['-c:v', 'copy', '-bsf:v', 'h264_mp4toannexb', '-f', 'mpegts']
-
+    
     // Is the clip too short to have a body?
     if (k2 <= k1) {
       console.log(`[smart] Clip too short or no keyframes inside, full re-encode used.`)

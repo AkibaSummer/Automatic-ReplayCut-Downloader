@@ -239,6 +239,14 @@ export class SqliteStore {
     return deleted
   }
 
+  cleanupStaleClipTasks() {
+    this.prepare(
+      `UPDATE clip_tasks
+       SET status = 'error', message = 'App closed during processing'
+       WHERE status IN ('pending', 'processing')`
+    ).run()
+  }
+
   getReplays(baseDir: string): ReplayRecord[] {
     const replayRows = this.prepare(
       `SELECT *
@@ -275,8 +283,10 @@ export class SqliteStore {
       if (filePath && !path.isAbsolute(filePath)) {
         filePath = resolveAppPathWithBase(baseDir, filePath)
       }
-      if (filePath && !fs.existsSync(filePath) && ['completed', 'deleted'].includes(String(row.status || ''))) {
+      let status = String(row.status || 'not_downloaded')
+      if (filePath && !fs.existsSync(filePath) && ['completed', 'deleted'].includes(status)) {
         filePath = ''
+        status = 'deleted'
       }
       return {
         ID: safeNumber(row.id),
@@ -298,7 +308,7 @@ export class SqliteStore {
         speed: String(row.speed || ''),
         elapsed: String(row.elapsed || ''),
         eta: String(row.eta || ''),
-        status: String(row.status || 'not_downloaded'),
+        status: status,
         message: String(row.message || ''),
         verify_ok: boolFromDb(row.verify_ok),
         actual_duration: safeNumber(row.actual_dur),
@@ -335,8 +345,10 @@ export class SqliteStore {
     if (filePath && !path.isAbsolute(filePath)) {
       filePath = resolveAppPathWithBase(baseDir, filePath)
     }
-    if (filePath && !fs.existsSync(filePath) && ['completed', 'deleted'].includes(String(row.status || ''))) {
+    let status = String(row.status || 'not_downloaded')
+    if (filePath && !fs.existsSync(filePath) && ['completed', 'deleted'].includes(status)) {
       filePath = ''
+      status = 'deleted'
     }
 
     return {
@@ -359,7 +371,7 @@ export class SqliteStore {
       speed: String(row.speed || ''),
       elapsed: String(row.elapsed || ''),
       eta: String(row.eta || ''),
-      status: String(row.status || 'not_downloaded'),
+      status: status,
       message: String(row.message || ''),
       verify_ok: boolFromDb(row.verify_ok),
       actual_duration: safeNumber(row.actual_dur),
@@ -369,7 +381,12 @@ export class SqliteStore {
 
   patchReplay(
     liveKey: string,
-    patch: Partial<Pick<ReplayRecord, 'file_path' | 'file_size' | 'resolution' | 'bitrate' | 'progress' | 'speed' | 'elapsed' | 'eta' | 'status' | 'message' | 'verify_ok' | 'actual_duration'>>,
+    patch: Partial<
+      Pick<
+        ReplayRecord,
+        'status' | 'message' | 'progress' | 'speed' | 'elapsed' | 'eta' | 'file_path' | 'file_size' | 'resolution' | 'bitrate' | 'verify_ok' | 'actual_duration' | 'replay_id' | 'title' | 'start_time' | 'end_time' | 'duration' | 'cover_url' | 'local_cover'
+      >
+    >,
   ) {
     const currentRow = this.prepare('SELECT * FROM bilibili_replays WHERE live_key = ?').get<Record<string, unknown>>(liveKey)
     if (!currentRow) return null
@@ -422,6 +439,25 @@ export class SqliteStore {
     
     const lastInsert = this.get<{ id: number }>('SELECT last_insert_rowid() AS id')
     return lastInsert?.id || 0
+  }
+
+  insertReplay(data: Partial<ReplayRecord> & { live_key: string }) {
+    const now = new Date().toISOString()
+    this.prepare(
+      `INSERT INTO bilibili_replays (
+         created_at, updated_at, replay_id, live_key, room_id, title, start_time, end_time, duration,
+         cover_url, local_cover, file_path, file_size, resolution, bitrate, progress, speed, elapsed, eta,
+         status, message, verify_ok, actual_dur
+       ) VALUES (
+         ?, ?, ?, ?, ?, ?, ?, ?, ?,
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+         ?, ?, ?, ?
+       )`
+    ).run(
+      now, now, data.replay_id || 0, data.live_key, data.room_id || 0, data.title || '', data.start_time || 0, data.end_time || 0, data.duration || 0,
+      data.cover_url || '', data.local_cover || '', data.file_path || '', data.file_size || 0, data.resolution || '', data.bitrate || '', data.progress || 0, data.speed || '', data.elapsed || '', data.eta || '',
+      data.status || 'not_downloaded', data.message || '', data.verify_ok ? 1 : 0, data.actual_duration || 0
+    )
   }
 
   updateClipTask(id: number, patch: Partial<Pick<ClipTaskRecord, 'status' | 'progress' | 'message' | 'file_path'>>) {

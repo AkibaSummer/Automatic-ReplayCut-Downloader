@@ -165,6 +165,15 @@ export class BilibiliClient {
     }
   }
 
+  public async fetchReplays(roomId: string | number, page: number, pageSize: number) {
+    const url = `https://api.live.bilibili.com/xlive/web-room/v1/record/getList?room_id=${roomId}&page=${page}&page_size=${pageSize}`
+    const result = await this.fetchJSON<{
+      code: number; message: string; data?: { list?: Array<{ id: number; live_key: string; title: string; start_time: number; end_time: number; duration: number; cover: string }> }
+    }>(url)
+    if (result.code !== 0) throw new Error(result.message || 'Fetch replays failed')
+    return result.data?.list || []
+  }
+
   public parseBilibiliUrl(url: string): { type: 'bv' | 'av'; id: string; p: number } | null {
     const pMatch = url.match(/[?&]p=(\d+)/)
     const p = pMatch ? parseInt(pMatch[1], 10) : 1

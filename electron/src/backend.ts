@@ -30,31 +30,31 @@ import { DownloaderService } from './downloader'
 import { ClipService } from './clip'
 import { FeishuClient } from './feishu'
 
-class DesktopBackend {
-  private readonly baseDir: string
-  private readonly configPath: string
-  private config: AppConfig
-  private readonly db: SqliteStore
-  private readonly bilibiliClient: BilibiliClient
-  private readonly downloaderService: DownloaderService
-  private readonly clipService: ClipService
-  private readonly feishuClient: FeishuClient
+export class DesktopBackend {
+  public readonly baseDir: string
+  public readonly configPath: string
+  public config: AppConfig
+  public readonly db: SqliteStore
+  public readonly bilibiliClient: BilibiliClient
+  public readonly downloaderService: DownloaderService
+  public readonly clipService: ClipService
+  public readonly feishuClient: FeishuClient
 
-  private readonly app = express()
-  private readonly server = http.createServer(this.app)
-  private readonly wss = new WebSocketServer({ noServer: true })
+  public readonly app = express()
+  public readonly server = http.createServer(this.app)
+  public readonly wss = new WebSocketServer({ noServer: true })
 
-  private runtimePaused = false
-  private readonly activeTasks = new Map<string, TaskHandle>()
-  private readonly pausedTasks = new Set<string>()
-  private runningTasks = 0
-  private readonly queue: string[] = []
+  public runtimePaused = false
+  public readonly activeTasks = new Map<string, TaskHandle>()
+  public readonly pausedTasks = new Set<string>()
+  public runningTasks = 0
+  public readonly queue: string[] = []
 
-  private diskStatsCache: {
+  public diskStatsCache: {
     value: { path: string; total_bytes: number; free_bytes: number; used_by_service_bytes: number }
     expiresAt: number
   } | null = null
-  private diskStatsPromise: Promise<{
+  public diskStatsPromise: Promise<{
     path: string; total_bytes: number; free_bytes: number; used_by_service_bytes: number
   }> | null = null
 
@@ -126,7 +126,7 @@ class DesktopBackend {
 
   // ──────────────────────────── Routes ────────────────────────────
 
-  private registerRoutes() {
+  public registerRoutes() {
     this.app.get('/api/health', (_req, res) => {
       res.json({ ok: true })
     })
@@ -720,7 +720,7 @@ class DesktopBackend {
     })
   }
 
-  private emitClipTaskUpdate(taskId: number) {
+  public emitClipTaskUpdate(taskId: number) {
     const tasks = this.db.getClipTasks()
     const task = tasks.find(t => t.id === taskId)
     if (!task) return
@@ -734,10 +734,10 @@ class DesktopBackend {
 
   // ──────────────────────── Runtime / Queue ────────────────────────
 
-  private updateProgressDebounced: Record<string, NodeJS.Timeout> = {}
-  private clipTasksAbort = new Map<number, AbortController>()
+  public updateProgressDebounced: Record<string, NodeJS.Timeout> = {}
+  public clipTasksAbort = new Map<number, AbortController>()
 
-  private getRuntime(): RuntimeSnapshot {
+  public getRuntime(): RuntimeSnapshot {
     const counts = this.db
       .prepare(
         `SELECT
@@ -760,7 +760,7 @@ class DesktopBackend {
     }
   }
 
-  private recoverInterruptedTasks() {
+  public recoverInterruptedTasks() {
     const replays = this.db.getReplays(this.baseDir)
     for (const replay of replays) {
       if (['pending', 'downloading', 'merging'].includes(replay.status)) {
@@ -769,7 +769,7 @@ class DesktopBackend {
     }
   }
 
-  private emitProgress(update: Partial<ProgressUpdate> & Pick<ProgressUpdate, 'live_key' | 'status'>) {
+  public emitProgress(update: Partial<ProgressUpdate> & Pick<ProgressUpdate, 'live_key' | 'status'>) {
     const payload: ProgressUpdate = {
       live_key: update.live_key,
       progress: update.progress ?? 0,
@@ -789,7 +789,7 @@ class DesktopBackend {
     }
   }
 
-  private enqueueReplay(liveKey: string, options?: { resetProgress?: boolean; message?: string }) {
+  public enqueueReplay(liveKey: string, options?: { resetProgress?: boolean; message?: string }) {
     const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
     if (!replay) return false
     if (this.activeTasks.has(liveKey)) return true
@@ -815,7 +815,7 @@ class DesktopBackend {
     return true
   }
 
-  private scheduleQueue() {
+  public scheduleQueue() {
     while (!this.runtimePaused && this.runningTasks < this.config.download.max_concurrent_tasks && this.queue.length > 0) {
       let foundIndex = -1
       let targetKey: string | null = null
@@ -864,7 +864,7 @@ class DesktopBackend {
     }
   }
 
-  private pauseReplay(liveKey: string) {
+  public pauseReplay(liveKey: string) {
     const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
     if (!replay) return false
     this.pausedTasks.add(liveKey)
@@ -889,14 +889,14 @@ class DesktopBackend {
     return true
   }
 
-  private resumeReplay(liveKey: string) {
+  public resumeReplay(liveKey: string) {
     const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
     if (!replay) return false
     this.pausedTasks.delete(liveKey)
     return this.enqueueReplay(liveKey, { resetProgress: false, message: 'Resumed' })
   }
 
-  private pauseAll() {
+  public pauseAll() {
     this.runtimePaused = true
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
@@ -909,7 +909,7 @@ class DesktopBackend {
     return count
   }
 
-  private resumeAll() {
+  public resumeAll() {
     this.runtimePaused = false
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
@@ -923,7 +923,7 @@ class DesktopBackend {
     return count
   }
 
-  private retryFailed() {
+  public retryFailed() {
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
       if (replay.status === 'failed') {
@@ -936,7 +936,7 @@ class DesktopBackend {
     return count
   }
 
-  private downloadUnfinished() {
+  public downloadUnfinished() {
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
       if (replay.status === 'not_downloaded') {
@@ -949,7 +949,7 @@ class DesktopBackend {
     return count
   }
 
-  private syncAllPending() {
+  public syncAllPending() {
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
       if (replay.status === 'pending') {
@@ -963,7 +963,7 @@ class DesktopBackend {
     return count
   }
 
-  private removeFromQueue(liveKey: string) {
+  public removeFromQueue(liveKey: string) {
     let idx = this.queue.indexOf(liveKey)
     while (idx >= 0) {
       this.queue.splice(idx, 1)
@@ -973,7 +973,7 @@ class DesktopBackend {
 
   // ──────────────────────── Scan / Covers ────────────────────────
 
-  private async scanReplays() {
+  public async scanReplays() {
     if (!this.config.bilibili.anchor_id) {
       throw new Error('请先在设置中填写 Bilibili 主播 UID')
     }
@@ -1003,94 +1003,48 @@ class DesktopBackend {
       throw new Error(payload.message || 'Scan failed')
     }
 
-    const now = new Date().toISOString()
     const rows = payload.data?.replay_info ?? []
-    const existingByLiveKey = new Map(this.db.getReplays(this.baseDir).map(item => [item.live_key, item]))
-    let newRecords = 0
-    let updatedRecords = 0
-    let coversUpdated = 0
-    let alreadyUpToDate = 0
+    let added = 0
+    let updated = 0
 
-    const upsert = this.db.prepare(
-      `INSERT INTO bilibili_replays (
-         created_at, updated_at, replay_id, live_key, room_id, title, start_time, end_time, duration,
-         cover_url, local_cover, file_path, file_size, resolution, bitrate, progress, speed, elapsed, eta,
-         status, message, verify_ok, actual_dur
-       ) VALUES (
-         @created_at, @updated_at, @replay_id, @live_key, @room_id, @title, @start_time, @end_time, @duration,
-         @cover_url, @local_cover, @file_path, @file_size, @resolution, @bitrate, @progress, @speed, @elapsed, @eta,
-         @status, @message, @verify_ok, @actual_dur
-       )
-       ON CONFLICT(live_key) DO UPDATE SET
-         updated_at = excluded.updated_at,
-         replay_id = excluded.replay_id,
-         room_id = excluded.room_id,
-         title = excluded.title,
-         start_time = excluded.start_time,
-         end_time = excluded.end_time,
-         duration = excluded.duration,
-         cover_url = excluded.cover_url,
-         local_cover = excluded.local_cover`,
-    )
-
-    const liveKeys = new Set<string>()
     await this.db.withBatch(async () => {
-      for (const item of rows) {
-        liveKeys.add(item.live_key)
-        const previous = existingByLiveKey.get(item.live_key)
-        const localCover = await this.downloadCover(item.live_key, item.live_info?.cover || '')
-        if (localCover) coversUpdated += 1
-        upsert.run({
-          created_at: previous?.UpdatedAt || now,
-          updated_at: now,
-          replay_id: item.replay_id,
-          live_key: item.live_key,
-          room_id: item.room_id,
-          title: item.live_info?.title || previous?.title || '',
-          start_time: item.start_time,
-          end_time: item.end_time,
-          duration: safeNumber(item.video_info?.duration),
-          cover_url: item.live_info?.cover || previous?.cover_url || '',
-          local_cover: localCover || previous?.local_cover || '',
-          file_path: previous?.file_path || '',
-          file_size: previous?.file_size || 0,
-          resolution: previous?.resolution || '',
-          bitrate: previous?.bitrate || '',
-          progress: previous?.progress || 0,
-          speed: previous?.speed || '',
-          elapsed: previous?.elapsed || '',
-          eta: previous?.eta || '',
-          status: previous?.status || 'not_downloaded',
-          message: previous?.message || '',
-          verify_ok: previous?.verify_ok ? 1 : 0,
-          actual_dur: previous?.actual_duration || 0,
-        })
-        if (!previous) newRecords += 1
-        else if (
-          previous.title !== (item.live_info?.title || '') ||
-          previous.start_time !== item.start_time ||
-          previous.end_time !== item.end_time ||
-          previous.duration !== safeNumber(item.video_info?.duration)
-        ) updatedRecords += 1
-        else alreadyUpToDate += 1
+      for (const r of rows) {
+        const existing = this.db.getReplayByLiveKey(this.baseDir, r.live_key)
+        const localCover = await this.downloadCover(r.live_key, r.live_info?.cover || '')
+        if (!existing) {
+          this.db.insertReplay({
+            replay_id: r.replay_id,
+            live_key: r.live_key,
+            room_id: r.room_id,
+            title: r.live_info?.title || '',
+            start_time: r.start_time,
+            end_time: r.end_time,
+            duration: r.video_info?.duration || 0,
+            cover_url: r.live_info?.cover || '',
+            local_cover: localCover,
+            status: 'not_downloaded',
+            message: '',
+          })
+          added++
+        } else {
+          this.db.patchReplay(r.live_key, {
+            replay_id: r.replay_id,
+            title: r.live_info?.title || existing.title,
+            start_time: r.start_time,
+            end_time: r.end_time,
+            duration: r.video_info?.duration || existing.duration,
+            cover_url: r.live_info?.cover || existing.cover_url,
+            local_cover: localCover || existing.local_cover,
+          })
+          updated++
+        }
       }
-
-      // We no longer restore deleted replays to not_downloaded.
-      // If the user manually deleted it, it stays deleted.
     })
-    const markedDeleted = 0
 
-    return {
-      fetched: rows.length,
-      new_records: newRecords,
-      updated_records: updatedRecords,
-      covers_updated: coversUpdated,
-      marked_deleted: markedDeleted,
-      already_up_to_date: alreadyUpToDate,
-    } satisfies ScanSummary
+    return { added, updated, total: rows.length }
   }
 
-  private async downloadCover(liveKey: string, coverUrl: string) {
+  public async downloadCover(liveKey: string, coverUrl: string) {
     if (!coverUrl) return ''
     try {
       const ext = path.extname(new URL(coverUrl).pathname) || '.jpg'
@@ -1110,7 +1064,7 @@ class DesktopBackend {
 
   // ──────────────────────── Disk / FS ────────────────────────
 
-  private async getDiskStats() {
+  public async getDiskStats() {
     const now = Date.now()
     if (this.diskStatsCache && this.diskStatsCache.expiresAt > now) {
       return this.diskStatsCache.value
@@ -1132,16 +1086,13 @@ class DesktopBackend {
         value,
         expiresAt: Date.now() + 60_000,
       }
+      this.diskStatsPromise = null
       return value
     })()
-    try {
-      return await this.diskStatsPromise
-    } finally {
-      this.diskStatsPromise = null
-    }
+    return await this.diskStatsPromise
   }
 
-  private async getDirSize(target: string): Promise<number> {
+  public async getDirSize(target: string): Promise<number> {
     if (!target || !fs.existsSync(target)) return 0
     const entries = await fsp.readdir(target, { withFileTypes: true })
     let total = 0
@@ -1156,7 +1107,7 @@ class DesktopBackend {
     return total
   }
 
-  private async listDirectories(current: string) {
+  public async listDirectories(current: string) {
     if (!current) {
       if (process.platform === 'win32') {
         const entries = []
@@ -1189,7 +1140,7 @@ class DesktopBackend {
 
   // ──────────────────────── Helpers ────────────────────────
 
-  private sendError(res: Response, error: unknown) {
+  public sendError(res: Response, error: unknown) {
     const message = error instanceof Error ? error.message : 'Unknown error'
     res.status(500).json({ error: message })
   }
