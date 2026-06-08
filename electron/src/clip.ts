@@ -100,7 +100,8 @@ export class ClipService {
       }
       throw err
     } finally {
-      await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+      // DEBUG: keep temp dir
+      // await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {})
     }
 
     return {
@@ -371,11 +372,29 @@ export class ClipService {
       const bodyDur = k2 - k1
       if (bodyDur > 0) {
         const bodyTs = path.join(tempDir, 'body.ts')
+        const segPattern = path.join(tempDir, 'seg_body_%03d.ts')
         console.log(`[smart] Body: ${k1.toFixed(2)} -> ${k2.toFixed(2)} (${bodyDur.toFixed(2)}s)`)
         onProgress?.(50, '流复制中间视频...')
+        const safeBodyDur = Math.max(0.1, bodyDur - 0.05).toFixed(4)
         await this.runFfmpegCommand(
-          ['-ss', `${k1}`, '-i', rawVideoPath, '-t', `${bodyDur}`, '-an', ...copyFlags, '-y', bodyTs],
+          [
+            '-y',
+            '-ss', `${k1}`,
+            '-i', rawVideoPath,
+            '-f', 'segment',
+            '-segment_times', safeBodyDur,
+            '-an',
+            '-c:v', 'copy',
+            '-bsf:v', 'h264_mp4toannexb',
+            '-reset_timestamps', '1',
+            segPattern
+          ],
           signal
+        )
+        // Rename the first segment to bodyTs
+        await fs.promises.rename(
+          path.join(tempDir, 'seg_body_000.ts'),
+          bodyTs
         )
         tsFiles.push(bodyTs)
       }
