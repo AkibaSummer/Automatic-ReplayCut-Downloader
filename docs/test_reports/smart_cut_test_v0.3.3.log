@@ -1,0 +1,385 @@
+Fetching records from Feishu...
+Skipping invalid record 万色万空 (URL: , 1:20:25-)
+
+
+============================================================
+Test 2/500: 微熱
+URL: http://www.bilibili.com/video/BV1rdG565EMt
+Range: 3867s → 4173s (306s)
+============================================================
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 3867→4173 (306.0s)
+  [smart] 1.0% - 下载中...                                                        [smart] Step 1: Download raw video [3852s, +331s]
+[ffmpeg] -ss 3852 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/09/93/38565579309/38565579309-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&oi=2085476411&mid=156077349&gen=playurlv3&og=hw&deadline=1780940978&platform=pc&trid=fdf76efd79a64bc28aaf0588b9399e7u&nbs=1&os=cosbv&uipk=5&upsig=b8a6ad6a753e878f6962e271becc8802&uparams=e,oi,mid,gen,og,deadline,platform,trid,nbs,os,uipk&bvc=vod&nettype=0&bw=6092748&lrs=-1&buvid=&build=0&dl=0&f=u_0_0&qn_dyeid=4542938e8194598d004743006a26e492&agrr=0&orderid=0,3 ...
+  [smart] 8.1% - 下载视频... 23.8 MB                                                 [smart] 18.0% - 下载视频... 56.8 MB                                                [smart] 28.1% - 下载视频... 90.3 MB                                                [smart] 29.0% - 下载视频... 115.5 MB                                               [smart] 29.0% - 下载视频... 143.3 MB                                               [smart] 29.0% - 下载视频... 172.3 MB                                               [smart] 29.0% - 下载视频... 197.5 MB                                               [smart] 29.0% - 下载视频... 214.0 MB                                               [smart] 29.0% - 下载视频... 230.5 MB                                               [smart] 29.0% - 下载视频... 252.0 MB                                               [smart] 30.0% - 分析关键帧...                                                     [smart] relStart=16.95, k1=20.00, k2=322.52, relEnd=322.95
+[smart] Head: 16.95 -> 20.00 (3.05s)
+  [smart] 40.0% - 重编码头部视频...                                                   [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933776482\raw_video.mp4 -ss 16.953799999999696 -t 3.0465000000003037 ...
+[smart] Body: 20.00 -> 322.52 (302.52s)
+  [smart] 50.0% - 流复制中间视频...                                                   [ffmpeg] -y -ss 20.0003 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933776482\raw_video.mp4 -f ...
+[smart] Tail: 322.52 -> 322.95 (0.43s)
+  [smart] 60.0% - 重编码尾部视频...                                                   [ffmpeg] -ss 322.521 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933776482\raw_video.mp4 -t 0.43279999999970187 ...
+  [smart] 70.0% - 合并视频段...                                                     [ffmpeg] -f concat -safe 0 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933776482\list.txt ...
+  [smart] 80.0% - 处理无损音频轨...                                                   [ffmpeg] -ss 3867 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-estgoss.bilivideo.com/upgcxcode/09/93/38565579309/38565579309-1-30280.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&deadline=1780940978&trid=fdf76efd79a64bc28aaf0588b9399e7u&oi=2085476411&gen=playurlv3&og=ali&mid=156077349&uipk=5&platform=pc&os=estgoss&nbs=1&upsig=16c73a9a1bd9eca20e0399ea3902d5cd&uparams=e,deadline,trid,oi,gen,og,mid,uipk,platform,os,nbs&bvc=vod&nettype=0&bw=185005&lrs=-1&dl=0&f=u_0_0&qn_dyeid=4542938e8194598d004743006a26e492&agrr=0&buvid=&build=0&orderid=0,3 ...
+  [smart] 95.0% - 最终合成混流...                                                    [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933776482\concat_video.mp4 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933776482\audio.m4a -c copy ...
+  [smart] 100.0% - 智能无损切片完成                                                    
+  ✅ Smart Cut: 47.4s, 250.01 MB
+     E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\clips\[cut] sample-1-微熱 (1-04-27-1-09-33) (3).mp4
+
+  Running JUMP DETECTION...
+    KF @ 0.00s: avg=0.9192, min=0.8262 ✅ smooth
+    KF @ 3.05s: avg=0.9593, min=0.9256 ✅ smooth
+    KF @ 150.57s: avg=0.9162, min=0.7985 ✅ smooth
+    KF @ 300.57s: avg=0.9526, min=0.9034 ✅ smooth
+    KF @ 305.57s: avg=0.9371, min=0.8247 ✅ smooth
+  🎉 Test PASSED: No boundary jumps detected for 微熱
+
+
+============================================================
+Test 3/500: 涙の物語（泪的物语）
+URL: http://www.bilibili.com/video/BV1XFLD6uE1q
+Range: 712s → 906s (194s)
+============================================================
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 712→906 (194.0s)
+  [smart] 1.0% - 下载中...                                                        [smart] Step 1: Download raw video [697s, +219s]
+[ffmpeg] -ss 697 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&trid=8a19297226f7421098292f4781928a5u&deadline=1780941073&oi=2085476411&os=cosbv&mid=156077349&uipk=5&nbs=1&platform=pc&gen=playurlv3&og=hw&upsig=2188cefdfdbce644c960b58ddb912c6a&uparams=e,trid,deadline,oi,os,mid,uipk,nbs,platform,gen,og&bvc=vod&nettype=0&bw=4616126&lrs=-1&f=u_0_0&qn_dyeid=f7bfa6c39d732cb6003573cc6a26e4f1&agrr=0&buvid=&build=0&dl=0&orderid=0,3 ...
+  [smart] 2.6% - 下载视频... 5.3 MB                                                  [smart] 6.0% - 下载视频... 16.5 MB                                                 [smart] 8.9% - 下载视频... 26.3 MB                                                 [smart] 12.4% - 下载视频... 38.0 MB                                                [smart] 15.6% - 下载视频... 48.5 MB                                                [smart] 18.8% - 下载视频... 59.3 MB                                                [smart] 21.7% - 下载视频... 69.0 MB                                                [smart] 24.1% - 下载视频... 77.0 MB                                                [smart] 26.7% - 下载视频... 85.8 MB                                                [smart] 29.0% - 下载视频... 94.8 MB                                                [smart] 29.0% - 下载视频... 108.0 MB                                               [smart] 30.0% - 分析关键帧...                                                     [smart] relStart=16.99, k1=20.00, k2=208.33, relEnd=210.99
+[smart] Head: 16.99 -> 20.00 (3.01s)
+  [smart] 40.0% - 重编码头部视频...                                                   [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933872046\raw_video.mp4 -ss 16.991659999999946 -t 3.008640000000053 ...
+[smart] Body: 20.00 -> 208.33 (188.33s)
+  [smart] 50.0% - 流复制中间视频...                                                   [ffmpeg] -y -ss 20.0003 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933872046\raw_video.mp4 -f ...
+[smart] Tail: 208.33 -> 210.99 (2.66s)
+  [smart] 60.0% - 重编码尾部视频...                                                   [ffmpeg] -ss 208.331 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933872046\raw_video.mp4 -t 2.6606599999999503 ...
+  [smart] 70.0% - 合并视频段...                                                     [ffmpeg] -f concat -safe 0 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933872046\list.txt ...
+  [smart] 80.0% - 处理无损音频轨...                                                   [ffmpeg] -ss 712 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirror08c.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30280.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&trid=8a19297226f7421098292f4781928a5u&mid=156077349&deadline=1780941073&oi=2085476411&platform=pc&os=08cbv&og=hw&uipk=5&nbs=1&gen=playurlv3&upsig=a7f8c710b441121f37bf1cf8119ed5f2&uparams=e,trid,mid,deadline,oi,platform,os,og,uipk,nbs,gen&bvc=vod&nettype=0&bw=184884&lrs=-1&dl=0&f=u_0_0&qn_dyeid=f7bfa6c39d732cb6003573cc6a26e4f1&agrr=0&buvid=&build=0&orderid=0,3 ...
+  [smart] 95.0% - 最终合成混流...                                                    [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933872046\concat_video.mp4 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780933872046\audio.m4a -c copy ...
+  [smart] 100.0% - 智能无损切片完成                                                    
+  ✅ Smart Cut: 42.7s, 111.26 MB
+     E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\clips\[cut] sample-2-涙の物語（泪的物语） (0-11-52-0-15-06) (1).mp4
+
+  Running JUMP DETECTION...
+    KF @ 0.00s: avg=0.9771, min=0.9596 ✅ smooth
+    KF @ 3.02s: avg=0.9729, min=0.9561 ✅ smooth
+    KF @ 96.35s: avg=0.9679, min=0.9349 ✅ smooth
+    KF @ 186.35s: avg=0.9847, min=0.9830 ✅ smooth
+Fetching records from Feishu...
+Skipping invalid record 万色万空 (URL: , 1:20:25-)
+Skipping already verified test 2: 微熱
+Skipping already verified test 3: 涙の物語（泪的物语）
+
+
+============================================================
+Test 4/500: 阿楚姑娘
+URL: http://www.bilibili.com/video/BV1XFLD6uE1q
+Range: 1736s �?1990s (254s)
+============================================================
+
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 1736�?990 (254.0s)
+
+  [smart] 1.0% - 下载�?..                                                        [smart] Step 1: Download raw video [1721s, +279s]
+[ffmpeg] -ss 1721 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&deadline=1780941895&nbs=1&trid=45fc188887084382947d9787189c2d7u&mid=156077349&os=cosbv&uipk=5&oi=2085476411&platform=pc&gen=playurlv3&og=hw&upsig=493ded2458e2ac09907dc27565fa65f9&uparams=e,deadline,nbs,trid,mid,os,uipk,oi,platform,gen,og&bvc=vod&nettype=0&bw=4616126&lrs=-1&buvid=&build=0&dl=0&f=u_0_0&qn_dyeid=f36b759e44bc3a93007a57076a26e827&agrr=0&orderid=0,3 ...
+
+  [smart] 3.1% - 下载视频... 7.0 MB                                                
+  [smart] 7.8% - 下载视频... 22.8 MB                                               
+  [smart] 12.8% - 下载视频... 39.3 MB                                              
+  [smart] 17.1% - 下载视频... 53.8 MB                                              
+  [smart] 21.9% - 下载视频... 69.8 MB                                              
+  [smart] 24.8% - 下载视频... 79.3 MB                                              
+  [smart] 27.7% - 下载视频... 89.0 MB                                              
+  [smart] 29.0% - 下载视频... 98.8 MB                                              
+  [smart] 29.0% - 下载视频... 112.3 MB                                             
+  [smart] 29.0% - 下载视频... 128.8 MB                                             
+  [smart] 29.0% - 下载视频... 138.5 MB                                             
+  [smart] 29.0% - 下载视频... 155.3 MB                                             
+  [smart] 30.0% - 分析关键�?..                                                     [smart] relStart=15.96, k1=20.00, k2=268.33, relEnd=269.96
+[smart] Head: 15.96 -> 20.00 (4.04s)
+
+  [smart] 40.0% - 重编码头部视�?..                                                   [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934694000\raw_video.mp4 -ss 15.958720000000035 -t 4.041679999999964 ...
+[smart] Body: 20.00 -> 268.33 (248.33s)
+
+  [smart] 50.0% - 流复制中间视�?..                                                   [ffmpeg] -y -ss 20.0004 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934694000\raw_video.mp4 -f ...
+[smart] Tail: 268.33 -> 269.96 (1.63s)
+
+  [smart] 60.0% - 重编码尾部视�?..                                                   [ffmpeg] -ss 268.332 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934694000\raw_video.mp4 -t 1.6267200000000344 ...
+
+  [smart] 70.0% - 合并视频�?..                                                     [ffmpeg] -f concat -safe 0 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934694000\list.txt ...
+
+  [smart] 80.0% - 处理无损音频�?..                                                   [ffmpeg] -ss 1736 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirror08c.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30280.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&deadline=1780941895&uipk=5&oi=2085476411&mid=156077349&gen=playurlv3&os=08cbv&nbs=1&platform=pc&trid=45fc188887084382947d9787189c2d7u&og=hw&upsig=cd24fc0794b001b5c0f6f4aea0ad8e85&uparams=e,deadline,uipk,oi,mid,gen,os,nbs,platform,trid,og&bvc=vod&nettype=0&bw=184884&lrs=-1&dl=0&f=u_0_0&qn_dyeid=f36b759e44bc3a93007a57076a26e827&agrr=0&buvid=&build=0&orderid=0,3 ...
+
+  [smart] 95.0% - 最终合成混�?..                                                    [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934694000\concat_video.mp4 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934694000\audio.m4a -c copy ...
+
+  [smart] 100.0% - 智能无损切片完成                                                    
+  �?Smart Cut: 47.6s, 153.78 MB
+     E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\clips\[cut] sample-3-阿楚姑娘 (0-28-56-0-33-10) (1).mp4
+
+  Running JUMP DETECTION...
+    KF @ 0.00s: avg=0.9678, min=0.9390 �?smooth
+    KF @ 4.05s: avg=0.9830, min=0.9774 �?smooth
+    KF @ 127.39s: avg=0.9744, min=0.9624 �?smooth
+    KF @ 247.39s: avg=0.9454, min=0.8893 �?smooth
+    KF @ 252.39s: avg=0.9844, min=0.9792 �?smooth
+  🎉 Test PASSED: No boundary jumps detected for 阿楚姑娘
+
+
+============================================================
+Test 5/500: glow
+URL: http://www.bilibili.com/video/BV1XFLD6uE1q
+Range: 2109s �?2393s (284s)
+============================================================
+
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 2109�?393 (284.0s)
+
+  [smart] 1.0% - 下载�?..                                                        [smart] Step 1: Download raw video [2094s, +309s]
+[ffmpeg] -ss 2094 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&nbs=1&uipk=5&deadline=1780941977&gen=playurlv3&platform=pc&trid=b3d7c1ddb0af4dcabe6c6b8cf831c02u&oi=2085476411&mid=156077349&os=cosbv&og=hw&upsig=d694b6b8b7c59de70b652b263f43415e&uparams=e,nbs,uipk,deadline,gen,platform,trid,oi,mid,os,og&bvc=vod&nettype=0&bw=4616126&lrs=-1&qn_dyeid=9bac4ef6dc51272200f2b7036a26e879&agrr=0&buvid=&build=0&dl=0&f=u_0_0&orderid=0,3 ...
+
+  [smart] 2.6% - 下载视频... 5.3 MB                                                
+  [smart] 5.9% - 下载视频... 16.3 MB                                               
+  [smart] 9.5% - 下载视频... 28.3 MB                                               
+  [smart] 12.8% - 下载视频... 39.3 MB                                              
+  [smart] 16.0% - 下载视频... 50.0 MB                                              
+  [smart] 19.5% - 下载视频... 61.5 MB                                              
+  [smart] 22.5% - 下载视频... 71.5 MB                                              
+  [smart] 24.9% - 下载视频... 79.5 MB                                              
+  [smart] 26.9% - 下载视频... 86.3 MB                                              
+  [smart] 29.0% - 下载视频... 94.0 MB                                              
+  [smart] 29.0% - 下载视频... 103.8 MB                                             
+  [smart] 29.0% - 下载视频... 115.3 MB                                             
+  [smart] 29.0% - 下载视频... 129.0 MB                                             
+  [smart] 29.0% - 下载视频... 142.8 MB                                             
+  [smart] 29.0% - 下载视频... 155.5 MB                                             
+  [smart] 29.0% - 下载视频... 168.0 MB                                             
+  [smart] 30.0% - 分析关键�?..                                                     [smart] relStart=18.95, k1=20.00, k2=302.52, relEnd=302.95
+[smart] Head: 18.95 -> 20.00 (1.05s)
+
+  [smart] 40.0% - 重编码头部视�?..                                                   [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934775935\raw_video.mp4 -ss 18.949840000000044 -t 1.0505599999999546 ...
+[smart] Body: 20.00 -> 302.52 (282.52s)
+
+  [smart] 50.0% - 流复制中间视�?..                                                   [ffmpeg] -y -ss 20.0004 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934775935\raw_video.mp4 -f ...
+[smart] Tail: 302.52 -> 302.95 (0.43s)
+
+  [smart] 60.0% - 重编码尾部视�?..                                                   [ffmpeg] -ss 302.521 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934775935\raw_video.mp4 -t 0.4288400000000365 ...
+
+  [smart] 70.0% - 合并视频�?..                                                     [ffmpeg] -f concat -safe 0 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934775935\list.txt ...
+
+  [smart] 80.0% - 处理无损音频�?..                                                   [ffmpeg] -ss 2109 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirror08c.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30280.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&platform=pc&oi=2085476411&mid=156077349&nbs=1&uipk=5&gen=playurlv3&trid=b3d7c1ddb0af4dcabe6c6b8cf831c02u&deadline=1780941977&os=08cbv&og=hw&upsig=d03d451e9939b327ec88c02f00a63cd0&uparams=e,platform,oi,mid,nbs,uipk,gen,trid,deadline,os,og&bvc=vod&nettype=0&bw=184884&lrs=-1&dl=0&f=u_0_0&qn_dyeid=9bac4ef6dc51272200f2b7036a26e879&agrr=0&buvid=&build=0&orderid=0,3 ...
+
+  [smart] 95.0% - 最终合成混�?..                                                    [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934775935\concat_video.mp4 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934775935\audio.m4a -c copy ...
+
+  [smart] 100.0% - 智能无损切片完成                                                    
+  �?Smart Cut: 49.9s, 168.03 MB
+     E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\clips\[cut] sample-4-glow (0-35-09-0-39-53).mp4
+
+  Running JUMP DETECTION...
+    KF @ 0.00s: avg=0.9848, min=0.9800 �?smooth
+    KF @ 1.07s: avg=0.9807, min=0.9512 �?smooth
+    KF @ 138.59s: avg=0.9531, min=0.9133 �?smooth
+    KF @ 278.59s: avg=0.9882, min=0.9859 �?smooth
+    KF @ 283.59s: avg=0.9767, min=0.9428 �?smooth
+  🎉 Test PASSED: No boundary jumps detected for glow
+
+
+============================================================
+Test 6/500: 亲爱的，那不是爱�?URL: http://www.bilibili.com/video/BV1XFLD6uE1q
+Range: 2567s �?2823s (256s)
+============================================================
+
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 2567�?823 (256.0s)
+
+  [smart] 1.0% - 下载�?..                                                        [smart] Step 1: Download raw video [2552s, +281s]
+[ffmpeg] -ss 2552 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&oi=2085476411&platform=pc&trid=4b529578c47547789f918962e6f63b1u&nbs=1&mid=156077349&gen=playurlv3&uipk=5&deadline=1780942070&os=cosbv&og=hw&upsig=55b8fd4852fd4772a837c45627fc353f&uparams=e,oi,platform,trid,nbs,mid,gen,uipk,deadline,os,og&bvc=vod&nettype=0&bw=4616126&lrs=-1&dl=0&f=u_0_0&qn_dyeid=275d232dbec5d3bd007207186a26e8d6&agrr=0&buvid=&build=0&orderid=0,3 ...
+
+  [smart] 1.0% - 下载视频... 0.0 MB                                                
+  [smart] 9.0% - 下载视频... 26.5 MB                                               
+  [smart] 17.7% - 下载视频... 55.8 MB                                              
+  [smart] 24.0% - 下载视频... 76.5 MB                                              
+  [smart] 28.5% - 下载视频... 91.8 MB                                              
+  [smart] 29.0% - 下载视频... 114.8 MB                                             
+  [smart] 29.0% - 下载视频... 139.5 MB                                             
+  [smart] 30.0% - 分析关键�?..                                                     [smart] relStart=16.97, k1=20.00, k2=270.00, relEnd=272.97
+[smart] Head: 16.97 -> 20.00 (3.03s)
+
+  [smart] 40.0% - 重编码头部视�?..                                                   [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934868953\raw_video.mp4 -ss 16.9693999999998 -t 3.030900000000198 ...
+[smart] Body: 20.00 -> 270.00 (250.00s)
+
+  [smart] 50.0% - 流复制中间视�?..                                                   [ffmpeg] -y -ss 20.0003 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934868953\raw_video.mp4 -f ...
+[smart] Tail: 270.00 -> 272.97 (2.96s)
+
+  [smart] 60.0% - 重编码尾部视�?..                                                   [ffmpeg] -ss 270.005 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934868953\raw_video.mp4 -t 2.9643999999997845 ...
+
+  [smart] 70.0% - 合并视频�?..                                                     [ffmpeg] -f concat -safe 0 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934868953\list.txt ...
+
+  [smart] 80.0% - 处理无损音频�?..                                                   [ffmpeg] -ss 2567 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirror08c.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30280.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&uipk=5&os=08cbv&platform=pc&trid=4b529578c47547789f918962e6f63b1u&deadline=1780942070&oi=2085476411&gen=playurlv3&og=hw&nbs=1&mid=156077349&upsig=d6d38c317c25c22a22a62a5d6999b4c8&uparams=e,uipk,os,platform,trid,deadline,oi,gen,og,nbs,mid&bvc=vod&nettype=0&bw=184884&lrs=-1&build=0&dl=0&f=u_0_0&qn_dyeid=275d232dbec5d3bd007207186a26e8d6&agrr=0&buvid=&orderid=0,3 ...
+
+  [smart] 95.0% - 最终合成混�?..                                                    [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934868953\concat_video.mp4 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934868953\audio.m4a -c copy ...
+
+  [smart] 100.0% - 智能无损切片完成                                                    
+  �?Smart Cut: 47.9s, 156.31 MB
+     E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\clips\[cut] sample-5-亲爱的，那不是爱�?(0-42-47-0-47-03).mp4
+
+  Running JUMP DETECTION...
+    KF @ 0.00s: avg=0.9854, min=0.9732 �?smooth
+    KF @ 3.03s: avg=0.9835, min=0.9725 �?smooth
+    KF @ 128.03s: avg=0.9674, min=0.9389 �?smooth
+    KF @ 248.04s: avg=0.9764, min=0.9442 �?smooth
+    KF @ 253.04s: avg=0.9650, min=0.9335 �?smooth
+  🎉 Test PASSED: No boundary jumps detected for 亲爱的，那不是爱�?
+
+============================================================
+Test 7/500: 下雨�?
+URL: http://www.bilibili.com/video/BV1XFLD6uE1q
+Range: 3570s �?3841s (271s)
+============================================================
+
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 3570�?841 (271.0s)
+
+  [smart] 1.0% - 下载�?..                                                        [smart] Step 1: Download raw video [3555s, +296s]
+[ffmpeg] -ss 3555 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&nbs=1&platform=pc&uipk=5&trid=6ef8470421c34972b0c76e1f78bb7a8u&oi=2085476411&gen=playurlv3&deadline=1780942181&mid=156077349&os=cosbv&og=hw&upsig=5c51e80078a745b78b901e61e71a9ddb&uparams=e,nbs,platform,uipk,trid,oi,gen,deadline,mid,os,og&bvc=vod&nettype=0&bw=4616126&lrs=-1&qn_dyeid=00cdae83331b7cce00d2a3fa6a26e945&agrr=0&buvid=&build=0&dl=0&f=u_0_0&orderid=0,3 ...
+
+  [smart] 2.5% - 下载视频... 5.0 MB                                                
+  [smart] 5.5% - 下载视频... 15.0 MB                                               
+  [smart] 9.3% - 下载视频... 27.5 MB                                               
+  [smart] 12.7% - 下载视频... 39.0 MB                                              
+  [smart] 16.5% - 下载视频... 51.8 MB                                              
+  [smart] 20.1% - 下载视频... 63.5 MB                                              
+  [smart] 23.6% - 下载视频... 75.3 MB                                              
+  [smart] 26.2% - 下载视频... 84.0 MB                                              
+  [smart] 29.0% - 下载视频... 95.5 MB                                              
+  [smart] 29.0% - 下载视频... 107.3 MB                                             
+  [smart] 29.0% - 下载视频... 118.0 MB                                             
+  [smart] 29.0% - 下载视频... 129.8 MB                                             
+  [smart] 29.0% - 下载视频... 141.5 MB                                             
+  [smart] 29.0% - 下载视频... 152.3 MB                                             
+  [smart] 29.0% - 下载视频... 161.0 MB                                             
+  [smart] 29.0% - 下载视频... 169.3 MB                                             
+  [smart] 29.0% - 下载视频... 175.8 MB                                             
+  [smart] 30.0% - 分析关键�?..                                                     [smart] relStart=19.96, k1=20.00, k2=288.33, relEnd=290.96
+[smart] Body: 20.00 -> 288.33 (268.33s)
+
+  [smart] 50.0% - 流复制中间视�?..                                                   [ffmpeg] -y -ss 20.0003 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934979691\raw_video.mp4 -f ...
+[smart] Tail: 288.33 -> 290.96 (2.63s)
+
+  [smart] 60.0% - 重编码尾部视�?..                                                   [ffmpeg] -ss 288.332 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934979691\raw_video.mp4 -t 2.625399999999729 ...
+
+  [smart] 70.0% - 合并视频�?..                                                     [ffmpeg] -f concat -safe 0 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934979691\list.txt ...
+
+  [smart] 80.0% - 处理无损音频�?..                                                   [ffmpeg] -ss 3570 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirror08c.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30280.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&og=hw&deadline=1780942181&nbs=1&uipk=5&trid=6ef8470421c34972b0c76e1f78bb7a8u&platform=pc&mid=156077349&oi=2085476411&gen=playurlv3&os=08cbv&upsig=017bc99b08c5f0c7a7a6ebac2b6bf9cc&uparams=e,og,deadline,nbs,uipk,trid,platform,mid,oi,gen,os&bvc=vod&nettype=0&bw=184884&lrs=-1&qn_dyeid=00cdae83331b7cce00d2a3fa6a26e945&agrr=0&buvid=&build=0&dl=0&f=u_0_0&orderid=0,3 ...
+
+  [smart] 95.0% - 最终合成混�?..                                                    [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934979691\concat_video.mp4 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780934979691\audio.m4a -c copy ...
+
+  [smart] 100.0% - 智能无损切片完成                                                    
+  �?Smart Cut: 54.9s, 173.94 MB
+     E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\clips\[cut] sample-6-下雨�?(0-59-30-1-04-01).mp4
+
+  Running JUMP DETECTION...
+    KF @ 0.00s: avg=0.9449, min=0.9014 �?smooth
+    KF @ 5.00s: avg=0.9394, min=0.8774 �?smooth
+    KF @ 133.34s: avg=0.9615, min=0.9233 �?smooth
+    KF @ 263.34s: avg=0.9677, min=0.9362 �?smooth
+    KF @ 268.34s: avg=0.9728, min=0.8956 �?smooth
+  🎉 Test PASSED: No boundary jumps detected for 下雨�?
+
+
+============================================================
+Test 8/500: 让她降落
+URL: http://www.bilibili.com/video/BV1XFLD6uE1q
+Range: 6468s �?6708s (240s)
+============================================================
+
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 6468�?708 (240.0s)
+
+  [smart] 1.0% - 下载�?..                                                        [smart] Step 1: Download raw video [6453s, +265s]
+[ffmpeg] -ss 6453 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirrorcos.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&nbs=1&uipk=5&trid=4fb6d14e68324e249436ff5398e152du&deadline=1780942291&platform=pc&gen=playurlv3&os=cosbv&og=hw&mid=156077349&oi=2085476411&upsig=f68da16b69a949b83fa3f1e6a10ba8ba&uparams=e,nbs,uipk,trid,deadline,platform,gen,os,og,mid,oi&bvc=vod&nettype=0&bw=4616126&lrs=-1&agrr=0&buvid=&build=0&dl=0&f=u_0_0&qn_dyeid=05b95aeab1065f8000103fbb6a26e9b3&orderid=0,3 ...
+
+  [smart] 5.1% - 下载视频... 13.8 MB                                               
+  [smart] 13.6% - 下载视频... 42.0 MB                                              
+  [smart] 21.6% - 下载视频... 68.5 MB                                              
+  [smart] 25.7% - 下载视频... 82.3 MB                                              
+  [smart] 29.0% - 下载视频... 100.5 MB                                             
+  [smart] 29.0% - 下载视频... 127.0 MB                                             
+  [smart] 29.0% - 下载视频... 157.3 MB                                             
+  [smart] 30.0% - 分析关键�?..                                                     [smart] relStart=17.92, k1=20.00, k2=257.50, relEnd=257.92
+[smart] Head: 17.92 -> 20.00 (2.08s)
+
+  [smart] 40.0% - 重编码头部视�?..                                                   [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780935089415\raw_video.mp4 -ss 17.92259999999949 -t 2.077700000000508 ...
+[smart] Body: 20.00 -> 257.50 (237.50s)
+
+  [smart] 50.0% - 流复制中间视�?..                                                   [ffmpeg] -y -ss 20.0003 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780935089415\raw_video.mp4 -f ...
+[smart] Tail: 257.50 -> 257.92 (0.42s)
+
+  [smart] 60.0% - 重编码尾部视�?..                                                   [ffmpeg] -ss 257.498 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780935089415\raw_video.mp4 -t 0.4245999999994865 ...
+
+  [smart] 70.0% - 合并视频�?..                                                     [ffmpeg] -f concat -safe 0 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780935089415\list.txt ...
+
+  [smart] 80.0% - 处理无损音频�?..                                                   [ffmpeg] -ss 6468 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirror08c.bilivideo.com/upgcxcode/84/95/38482349584/38482349584-1-30280.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&trid=4fb6d14e68324e249436ff5398e152du&oi=2085476411&platform=pc&nbs=1&uipk=5&gen=playurlv3&mid=156077349&deadline=1780942291&os=08cbv&og=hw&upsig=752d053262cb057eaef5bd8ff0d9f1cd&uparams=e,trid,oi,platform,nbs,uipk,gen,mid,deadline,os,og&bvc=vod&nettype=0&bw=184884&lrs=-1&buvid=&build=0&dl=0&f=u_0_0&qn_dyeid=05b95aeab1065f8000103fbb6a26e9b3&agrr=0&orderid=0,3 ...
+
+  [smart] 95.0% - 最终合成混�?..                                                    [ffmpeg] -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780935089415\concat_video.mp4 -i E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\temp\clip_1780935089415\audio.m4a -c copy ...
+
+  [smart] 100.0% - 智能无损切片完成                                                    
+  �?Smart Cut: 43.0s, 159.83 MB
+     E:\workspace\go\src\github.com\AkibaSummer\Automatic-ReplayCut-Downloader\clips\[cut] sample-7-让她降落 (1-47-48-1-51-48).mp4
+
+  Running JUMP DETECTION...
+    KF @ 0.00s: avg=0.9659, min=0.9398 �?smooth
+    KF @ 2.08s: avg=0.9657, min=0.9404 �?smooth
+    KF @ 119.58s: avg=0.9325, min=0.8533 �?smooth
+    KF @ 234.59s: avg=0.9760, min=0.9690 �?smooth
+    KF @ 239.59s: avg=0.9629, min=0.9227 �?smooth
+  🎉 Test PASSED: No boundary jumps detected for 让她降落
+
+
+============================================================
+Test 9/500: Ham
+URL: http://www.bilibili.com/video/BV1XFLD6uE1q/?p=2
+Range: 1582s �?1927s (345s)
+============================================================
+
+  [smart] 0.0% - 获取视频信息...                                                     [clip] Mode: smart, Range: 1582�?927 (345.0s)
+
+  [smart] 1.0% - 下载�?..                                                        [smart] Step 1: Download raw video [1567s, +370s]
+[ffmpeg] -ss 1567 -headers Referer: https://live.bilibili.com/
+User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
+Cookie: DedeUserID=156077349; DedeUserID__ckMd5=c95e0f4d2c648532; SESSDATA=64e53847%2C1791488414%2C9f227%2A41CjBSWPOroz4UkzNunhx1Sj9pKEWSxjMl3v9sen6hwT_Kih_Amlg98LseZ_2GJLtPry4SVmJBZEJqcktLRUFsZHNHdVFFS05LVEVIdzJQbmowSmZLdjJEVUVTM3FtejRiMEVLSHdTaTFPdkVVb1BKZjhCRVlKb002RDl5Zi1FdG42UF9UQkgtaXBRIIEC; bili_jct=eea14c37b667c678dfc34de6143afb29; sid=4tfzj40r
+ -i https://upos-sz-mirror08c.bilivideo.com/upgcxcode/86/95/38482349586/38482349586-1-30116.m4s?e=ig8euxZM2rNcNbdlhoNvNC8BqJIzNbfqXBvEqxTEto8BTrNvN0GvT90W5JZMkX_YN0MvXg8gNEV4NC8xNEV4N03eN0B5tZlqNxTEto8BTrNvNeZVuJ10Kj_g2UB02J0mN0B5tZlqNCNEto8BTrNvNC7MTX502C8f2jmMQJ6mqF2fka1mqx6gqj0eN0B599M=&uipk=5&trid=0eb20244dddf4ff18e91859fa046f83u&deadline=1780942377&oi=2085476411&platform=pc&gen=playurlv3&os=08cbv&mid=156077349&nbs=1&og=hw&upsig=023ac64bd434f48d7c8b775ba6cba1a5&uparams=e,uipk,trid,deadline,oi,platform,gen,os,mid,nbs,og&bvc=vod&nettype=0&bw=5028995&lrs=-1&qn_dyeid=2beb4d6dc1d5cb7a0088b7f86a26ea09&agrr=0&buvid=&build=0&dl=0&f=u_0_0&orderid=0,3 ...
+
+  [smart] 2.3% - 下载视频... 4.3 MB                                                
+  [smart] 4.6% - 下载视频... 12.0 MB                                               
