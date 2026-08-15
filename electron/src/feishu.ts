@@ -106,7 +106,7 @@ export class FeishuClient {
         const text = await resp.text()
         throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
       }
-      return resp.json()
+      return await resp.json()
     } finally {
       clearTimeout(timer)
     }
@@ -131,7 +131,7 @@ export class FeishuClient {
         const text = await resp.text()
         throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
       }
-      return resp.json()
+      return await resp.json()
     } finally {
       clearTimeout(timer)
     }
@@ -157,7 +157,7 @@ export class FeishuClient {
         const text = await resp.text()
         throw new Error(`Feishu API ${resp.status}: ${text.slice(0, 300)}`)
       }
-      return resp.json()
+      return await resp.json()
     } finally {
       clearTimeout(timer)
     }

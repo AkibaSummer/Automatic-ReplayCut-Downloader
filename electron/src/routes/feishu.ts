@@ -1,7 +1,5 @@
 import type { DesktopBackend } from '../backend'
 import type { Request, Response } from 'express'
-import { saveConfigFile } from '../config'
-import { FeishuClient } from '../feishu'
 
 export function registerFeishuRoutes(backend: DesktopBackend) {
   backend.app.get('/api/feishu/status', async (_req: Request, res: Response) => {
@@ -14,23 +12,27 @@ export function registerFeishuRoutes(backend: DesktopBackend) {
   })
 
   backend.app.post('/api/feishu/config', async (req: Request, res: Response) => {
+    let mutation: ReturnType<DesktopBackend['beginMutation']> | undefined
     try {
+      mutation = backend.beginMutation()
       const { app_id, app_secret } = req.body
       if (!app_id || !app_secret) {
         res.status(400).json({ error: 'Missing app_id or app_secret' })
         return
       }
-      // Update config and save
-      backend.config.feishu.app_id = app_id
-      backend.config.feishu.app_secret = app_secret
-      await saveConfigFile(backend.baseDir, backend.configPath, backend.config)
-      // Reinitialize the client with new credentials
-      ;(backend as any).feishuClient = new FeishuClient(backend.config.feishu)
+      await backend.updateConfig(draft => {
+        draft.feishu.app_id = String(app_id).trim()
+        draft.feishu.app_secret = String(app_secret).trim()
+      })
       // Verify the new config works
       const status = await backend.feishuClient.checkStatus()
-      res.json(status)
+      // Other serialized settings may have committed while verification was
+      // in flight. Return the current canonical snapshot, not the old one.
+      res.json({ ...status, config: structuredClone(backend.config) })
     } catch (error) {
       backend.sendError(res, error)
+    } finally {
+      mutation?.finish()
     }
   })
 
@@ -56,7 +58,9 @@ export function registerFeishuRoutes(backend: DesktopBackend) {
   })
 
   backend.app.put('/api/feishu/records/:recordId', async (req: Request, res: Response) => {
+    let mutation: ReturnType<DesktopBackend['beginMutation']> | undefined
     try {
+      mutation = backend.beginMutation()
       const recordId = String(req.params.recordId)
       const { fields } = req.body
       if (!recordId || !fields || typeof fields !== 'object') {
@@ -67,6 +71,8 @@ export function registerFeishuRoutes(backend: DesktopBackend) {
       res.json({ ok: true })
     } catch (error) {
       backend.sendError(res, error)
+    } finally {
+      mutation?.finish()
     }
   })
 }

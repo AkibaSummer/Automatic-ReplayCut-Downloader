@@ -43,14 +43,16 @@ npm start
 .\build_release.ps1
 ```
 
-产物在 `release/ReplayManager-Windows-Portable.zip`。
+产物在 `release/ReplayManager-v0.3.9-windows-x64.zip`。
 
 ### 用户使用
 
-1. 解压便携包，双击 `ReplayManager.exe`
+1. 将便携包解压到可写目录（不要直接放在 `Program Files`），双击 `随缘公会工作台.exe`
 2. 首次使用需在设置页配置 B 站 Cookie 和目标主播 ID
 3. 点击「扫描」拉取最近录播列表
 4. 选择需要下载的录播，点击下载按钮
+
+升级时请覆盖解压到原便携目录，以保留同目录下的 `config.yaml`、`replays.db` 和 `cookies.json`。如果旧版本曾通过快捷方式从自定义工作目录启动，请先备份这些文件，并将它们放到新版 EXE 所在目录；下载目录等相对路径会以新版 EXE 目录为基准。
 
 ## 配置
 

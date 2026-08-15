@@ -2,10 +2,10 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { AppConfig, ReplayRecord, M3U8Segment, FileInfo } from './types'
+import { AppConfig, ReplayRecord, ReplayPatch, M3U8Segment, FileInfo } from './types'
 import { SqliteStore } from './db'
 import { BilibiliClient } from './bilibili'
-import { formatSeconds, uniquePath, renderFilenameTemplate } from './utils'
+import { formatSeconds, renderFilenameTemplate } from './utils'
 import { spawn } from 'node:child_process'
 import _ffmpegPath from 'ffmpeg-static'
 import { parseFile } from 'music-metadata'
@@ -23,69 +23,104 @@ export class DownloaderService {
     private emitProgress: (payload: any) => void,
   ) {}
 
-  public async processReplayTask(liveKey: string, signal: AbortSignal, baseDir: string) {
-    let replay = this.db.getReplayByLiveKey(baseDir, liveKey)
-    if (!replay) return
-
-    this.db.patchReplay(liveKey, { status: 'pending', message: 'Fetching stream list...' })
-    this.emitProgress({ live_key: liveKey, status: 'pending', progress: replay.progress, message: 'Fetching stream list...' })
-    await this.bilibiliClient.cacheReplayM3U8(replay)
-    replay = this.db.getReplayByLiveKey(baseDir, liveKey)
-    if (!replay || replay.streams.length === 0) {
-      throw new Error('No streams found for replay')
-    }
-
-    this.db.patchReplay(liveKey, {
-      status: 'downloading',
-      message: 'Initializing download...',
-      speed: '',
-      eta: '',
-      elapsed: replay.elapsed || '',
-    })
-    this.emitProgress({ live_key: liveKey, status: 'downloading', progress: replay.progress, message: 'Initializing download...' })
-
-    const finalPath = await this.downloadReplayWithContext(replay, signal)
-    const targetReplay = this.db.getReplayByLiveKey(baseDir, liveKey) || replay
-
-    this.db.patchReplay(liveKey, { message: 'Verifying duration...' })
-    let verifyOk = true
-    let actualDuration = 0
+  public async processReplayTask(
+    liveKey: string,
+    signal: AbortSignal,
+    baseDir: string,
+    isCurrent: () => boolean = () => true,
+  ) {
+    let finalPath = ''
+    let partPath = ''
+    let renamed = false
+    let committed = false
     try {
-      const verified = await this.verifyDuration(finalPath, targetReplay.duration)
-      verifyOk = verified.ok
-      actualDuration = verified.duration
-    } catch {
-      verifyOk = false
-    }
+      let replay = this.db.getReplayByLiveKey(baseDir, liveKey)
+      if (!replay) return
 
-    let fileInfo: FileInfo = { size: 0, resolution: '', bitrate: '' }
-    try {
-      fileInfo = await this.getFileInfo(finalPath)
-    } catch {
-      fileInfo = {
-        size: fs.existsSync(finalPath) ? fs.statSync(finalPath).size : 0,
-        resolution: '',
-        bitrate: '',
+      this.patchActiveReplay(liveKey, ['pending'], { status: 'pending', message: 'Fetching stream list...' }, signal, isCurrent)
+      this.emitProgress({ live_key: liveKey, status: 'pending' })
+      await this.bilibiliClient.cacheReplayM3U8(replay, signal)
+      this.assertActive(signal, isCurrent)
+
+      replay = this.db.getReplayByLiveKey(baseDir, liveKey)
+      if (!replay || replay.streams.length === 0) {
+        throw new Error('No streams found for replay')
       }
-    }
 
-    this.db.patchReplay(liveKey, {
-      file_path: finalPath,
-      file_size: fileInfo.size,
-      resolution: fileInfo.resolution,
-      bitrate: fileInfo.bitrate,
-      progress: 100,
-      speed: '',
-      eta: '',
-      status: 'completed',
-      message: verifyOk ? 'Success' : `Duration mismatch: expected ${targetReplay.duration}, got ${actualDuration.toFixed(1)}`,
-      verify_ok: verifyOk,
-      actual_duration: actualDuration,
-    })
-    this.emitProgress({ live_key: liveKey, status: 'completed', progress: 100, message: 'Success' })
+      this.patchActiveReplay(liveKey, ['pending'], {
+        status: 'downloading',
+        message: 'Initializing download...',
+        speed: '',
+        eta: '',
+        elapsed: replay.elapsed || '',
+      }, signal, isCurrent)
+      this.emitProgress({ live_key: liveKey, status: 'downloading' })
+
+      const output = await this.downloadReplayWithContext(replay, signal, isCurrent)
+      finalPath = output.finalPath
+      partPath = output.partPath
+      this.assertActive(signal, isCurrent)
+      const targetReplay = this.db.getReplayByLiveKey(baseDir, liveKey) || replay
+
+      this.patchActiveReplay(liveKey, ['merging'], { message: 'Verifying duration...' }, signal, isCurrent)
+      this.emitProgress({ live_key: liveKey, status: 'merging' })
+      let verifyOk = true
+      let actualDuration = 0
+      try {
+        const verified = await this.verifyDuration(partPath, targetReplay.duration)
+        verifyOk = verified.ok
+        actualDuration = verified.duration
+      } catch {
+        verifyOk = false
+      }
+      this.assertActive(signal, isCurrent)
+
+      let fileInfo: FileInfo = { size: 0, resolution: '', bitrate: '' }
+      try {
+        fileInfo = await this.getFileInfo(partPath)
+      } catch {
+        fileInfo = {
+          size: fs.existsSync(partPath) ? fs.statSync(partPath).size : 0,
+          resolution: '',
+          bitrate: '',
+        }
+      }
+      this.assertActive(signal, isCurrent)
+
+      if (fs.existsSync(finalPath)) {
+        throw new Error(`Replay output path became occupied: ${finalPath}`)
+      }
+      await fsp.rename(partPath, finalPath)
+      renamed = true
+      partPath = ''
+      this.assertActive(signal, isCurrent)
+
+      this.patchActiveReplay(liveKey, ['merging'], {
+        file_path: finalPath,
+        file_size: fileInfo.size,
+        resolution: fileInfo.resolution,
+        bitrate: fileInfo.bitrate,
+        progress: 100,
+        speed: '',
+        elapsed: targetReplay.elapsed,
+        eta: '',
+        status: 'completed',
+        message: verifyOk ? 'Success' : `Duration mismatch: expected ${targetReplay.duration}, got ${actualDuration.toFixed(1)}`,
+        verify_ok: verifyOk,
+        actual_duration: actualDuration,
+      }, signal, isCurrent)
+      committed = true
+      this.emitProgress({ live_key: liveKey, status: 'completed' })
+    } catch (error) {
+      if (partPath) await fsp.rm(partPath, { force: true }).catch(() => {})
+      if (finalPath && renamed && !committed) {
+        await fsp.rm(finalPath, { force: true }).catch(() => {})
+      }
+      throw error
+    }
   }
 
-  private async downloadReplayWithContext(replay: ReplayRecord, signal: AbortSignal) {
+  private async downloadReplayWithContext(replay: ReplayRecord, signal: AbortSignal, isCurrent: () => boolean) {
     const streams = [...replay.streams].sort((a, b) => a.start_time - b.start_time || a.end_time - b.end_time)
     if (streams.length === 0) {
       throw new Error(`no streams found for replay ${replay.live_key}`)
@@ -95,159 +130,165 @@ export class DownloaderService {
     if (!finalFilename.toLowerCase().endsWith('.mp4')) {
       finalFilename += '.mp4'
     }
-    let finalPath = path.join(this.config.download.output_dir, finalFilename)
-    finalPath = uniquePath(finalPath)
-    fs.mkdirSync(path.dirname(finalPath), { recursive: true })
-    fs.writeFileSync(finalPath, '')
+    const desiredPath = path.join(this.config.download.output_dir, finalFilename)
+    fs.mkdirSync(path.dirname(desiredPath), { recursive: true })
+    const { finalPath, partPath } = this.reserveOutputPaths(desiredPath)
 
     try {
       const startAt = Date.now()
-      let lastDbPatchAt = 0
       const speedHistory: number[] = []
       let downloadedBytes = 0
       let doneSegments = 0
       let totalSegments = 0
       let expectedDuration = 0
       const allSegmentFiles: string[] = []
-      const allSegmentDurations: number[] = []
       const streamDirs: string[] = []
 
-    for (let streamIdx = 0; streamIdx < streams.length; streamIdx += 1) {
-      if (signal.aborted) throw new Error('aborted')
-      const stream = streams[streamIdx]
-      const segments = await this.parseM3U8(stream.stream, stream.m3u8_text)
-      totalSegments += segments.length
-      expectedDuration += segments.reduce((sum, item) => sum + item.duration, 0)
-      const streamDir = path.join(this.config.download.temp_dir, `${replay.live_key}_stream${streamIdx}`)
-      await fsp.mkdir(streamDir, { recursive: true })
-      streamDirs.push(streamDir)
+      for (let streamIdx = 0; streamIdx < streams.length; streamIdx += 1) {
+        this.assertActive(signal, isCurrent)
+        const stream = streams[streamIdx]
+        const segments = await this.parseM3U8(stream.stream, stream.m3u8_text, signal)
+        this.assertActive(signal, isCurrent)
+        totalSegments += segments.length
+        expectedDuration += segments.reduce((sum, item) => sum + item.duration, 0)
+        const streamDir = path.join(this.config.download.temp_dir, `${replay.live_key}_stream${streamIdx}`)
+        await fsp.mkdir(streamDir, { recursive: true })
+        streamDirs.push(streamDir)
 
-      const streamSegmentOffset = allSegmentFiles.length
-      for (let i = 0; i < segments.length; i += 1) {
-        const segPath = path.join(streamDir, `seg_${String(i).padStart(5, '0')}.ts`)
-        allSegmentFiles.push(segPath)
-        allSegmentDurations.push(segments[i].duration)
-      }
-
-      const limit = this.config.download.concurrent_segments || 5
-      let active = 0
-      let currentIndex = 0
-      let hasError = false
-
-      await new Promise<void>((resolve, reject) => {
-        const checkDone = () => {
-          if (active === 0 && currentIndex >= segments.length && !hasError) resolve()
+        const streamSegmentOffset = allSegmentFiles.length
+        for (let i = 0; i < segments.length; i += 1) {
+          const segPath = path.join(streamDir, `seg_${String(i).padStart(5, '0')}.ts`)
+          allSegmentFiles.push(segPath)
         }
 
-        const next = () => {
-          if (hasError) return
-          if (signal.aborted) {
-            hasError = true
-            reject(new Error('aborted'))
-            return
-          }
-          if (currentIndex >= segments.length) {
-            checkDone()
-            return
-          }
+        const limit = Math.max(1, Math.floor(this.config.download.concurrent_segments || 5))
+        let currentIndex = 0
+        let firstError: unknown = null
 
-          while (active < limit && currentIndex < segments.length) {
-            if (hasError || signal.aborted) break
+        const downloadWorker = async () => {
+          while (!firstError) {
+            if (signal.aborted || !isCurrent()) {
+              firstError = this.abortError()
+              return
+            }
+
             const i = currentIndex++
-            active++
+            if (i >= segments.length) return
+
             const seg = segments[i]
             const segPath = allSegmentFiles[streamSegmentOffset + i]
 
-            ;(async () => {
-              try {
-                if (!fs.existsSync(segPath) || fs.statSync(segPath).size === 0) {
-                  const bytes = await this.downloadSegment(seg.url, segPath, signal)
-                  downloadedBytes += bytes
-                } else {
-                  downloadedBytes += fs.statSync(segPath).size
-                }
-                doneSegments += 1
-                
-                const elapsedSeconds = Math.max(1, (Date.now() - startAt) / 1000)
-                const speedMb = downloadedBytes / elapsedSeconds / 1024 / 1024
-                speedHistory.push(speedMb)
-                if (speedHistory.length > 30) speedHistory.shift()
-                const progress = Math.min(98, (doneSegments / Math.max(1, totalSegments)) * 100)
-                const elapsed = this.formatElapsed(elapsedSeconds)
-                const etaSeconds = speedMb <= 0 ? 0 : ((totalSegments - doneSegments) * elapsedSeconds) / Math.max(1, doneSegments)
-                
-                if (Date.now() - lastDbPatchAt > 10000) {
-                  lastDbPatchAt = Date.now()
-                  this.db.patchReplay(replay.live_key, {
-                    progress,
-                    speed: `${speedMb.toFixed(2)} MB/s`,
-                    elapsed,
-                    eta: etaSeconds > 0 ? this.formatElapsed(etaSeconds) : '',
-                    status: 'downloading',
-                    message: `Stream ${streamIdx + 1}/${streams.length}, Segment ${i + 1}/${segments.length}`,
-                  })
-                }
-
-                this.emitProgress({
-                  live_key: replay.live_key,
-                  status: 'downloading',
-                  progress,
-                  message: `Stream ${streamIdx + 1}/${streams.length}, Segment ${i + 1}/${segments.length}`,
-                  speed: `${speedMb.toFixed(2)} MB/s`,
-                  speed_history: [...speedHistory],
-                  elapsed,
-                  eta: etaSeconds > 0 ? this.formatElapsed(etaSeconds) : '',
-                })
-              } catch (err) {
-                if (!hasError) {
-                  hasError = true
-                  reject(err)
-                }
-              } finally {
-                active--
-                next()
+            try {
+              if (!fs.existsSync(segPath) || fs.statSync(segPath).size === 0) {
+                const bytes = await this.downloadSegment(seg.url, segPath, signal)
+                downloadedBytes += bytes
+              } else {
+                downloadedBytes += fs.statSync(segPath).size
               }
-            })()
+              this.assertActive(signal, isCurrent)
+              doneSegments += 1
+
+              const elapsedSeconds = Math.max(1, (Date.now() - startAt) / 1000)
+              const speedMb = downloadedBytes / elapsedSeconds / 1024 / 1024
+              speedHistory.push(speedMb)
+              if (speedHistory.length > 30) speedHistory.shift()
+              const progress = Math.min(98, (doneSegments / Math.max(1, totalSegments)) * 100)
+              const elapsed = this.formatElapsed(elapsedSeconds)
+              const etaSeconds = speedMb <= 0 ? 0 : ((totalSegments - doneSegments) * elapsedSeconds) / Math.max(1, doneSegments)
+
+              this.patchActiveReplay(replay.live_key, ['downloading'], {
+                progress,
+                speed: `${speedMb.toFixed(2)} MB/s`,
+                elapsed,
+                eta: etaSeconds > 0 ? this.formatElapsed(etaSeconds) : '',
+                status: 'downloading',
+                message: `Stream ${streamIdx + 1}/${streams.length}, Segment ${i + 1}/${segments.length}`,
+              }, signal, isCurrent)
+
+              this.emitProgress({
+                live_key: replay.live_key,
+                status: 'downloading',
+                speed_history: [...speedHistory],
+              })
+
+              // Cached segments do not await I/O. Yield periodically so aborts and UI
+              // updates are still handled while resuming a large existing download.
+              if (doneSegments % 100 === 0) {
+                await new Promise<void>(resolve => setImmediate(resolve))
+              }
+            } catch (err) {
+              firstError = err
+            }
           }
         }
 
-        const onAbort = () => {
-          if (!hasError) {
-            hasError = true
-            reject(new Error('aborted'))
-          }
-        }
-        signal.addEventListener('abort', onAbort, { once: true })
-        next()
-        
-        // Remove listener when done to avoid leak
-        const originalResolve = resolve
-        resolve = () => {
-          signal.removeEventListener('abort', onAbort)
-          originalResolve()
-        }
-        const originalReject = reject
-        reject = (err) => {
-          signal.removeEventListener('abort', onAbort)
-          originalReject(err)
-        }
-      })
-    }
+        const workerCount = Math.min(limit, segments.length)
+        await Promise.all(Array.from({ length: workerCount }, () => downloadWorker()))
+        if (firstError) throw firstError
+      }
 
-      this.db.patchReplay(replay.live_key, { status: 'merging', message: 'Merging all segments...', progress: 99 })
-      this.emitProgress({ live_key: replay.live_key, status: 'merging', progress: 99, merge_progress: 0, message: 'Merging all segments...' })
+      this.patchActiveReplay(replay.live_key, ['downloading'], { status: 'merging', message: 'Merging all segments...', progress: 99 }, signal, isCurrent)
+      this.emitProgress({ live_key: replay.live_key, status: 'merging', merge_progress: 0 })
 
-      await this.runFfmpegMerge(replay.live_key, allSegmentFiles, finalPath, expectedDuration, signal)
+      await this.runFfmpegMerge(replay.live_key, allSegmentFiles, partPath, expectedDuration, signal)
+      this.assertActive(signal, isCurrent)
 
       for (const dir of streamDirs) {
         await fsp.rm(dir, { recursive: true, force: true })
       }
-      return finalPath
+      this.assertActive(signal, isCurrent)
+      return { finalPath, partPath }
     } catch (err) {
-      if (fs.existsSync(finalPath)) {
-        try { fs.unlinkSync(finalPath) } catch (e) { console.error('Failed to unlink finalPath on error', e) }
+      if (fs.existsSync(partPath)) {
+        try { fs.unlinkSync(partPath) } catch (e) { console.error('Failed to unlink partPath on error', e) }
       }
       throw err
+    }
+  }
+
+  private abortError() {
+    const error = new Error('aborted')
+    error.name = 'AbortError'
+    return error
+  }
+
+  private reserveOutputPaths(desiredPath: string) {
+    const extension = path.extname(desiredPath) || '.mp4'
+    const directory = path.dirname(desiredPath)
+    const base = path.basename(desiredPath, extension)
+
+    for (let index = 0; index < 10_000; index += 1) {
+      const suffix = index === 0 ? '' : ` (${index})`
+      const finalPath = path.join(directory, `${base}${suffix}${extension}`)
+      const partPath = path.join(directory, `${base}${suffix}.part${extension}`)
+      if (fs.existsSync(finalPath)) continue
+      try {
+        const descriptor = fs.openSync(partPath, 'wx')
+        fs.closeSync(descriptor)
+        return { finalPath, partPath }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
+        throw error
+      }
+    }
+
+    throw new Error(`Unable to reserve replay output path for ${desiredPath}`)
+  }
+
+  private assertActive(signal: AbortSignal, isCurrent: () => boolean) {
+    if (signal.aborted || !isCurrent()) throw this.abortError()
+  }
+
+  private patchActiveReplay(
+    liveKey: string,
+    allowedStatuses: readonly string[],
+    patch: ReplayPatch,
+    signal: AbortSignal,
+    isCurrent: () => boolean,
+  ) {
+    this.assertActive(signal, isCurrent)
+    if (!this.db.patchReplayIfStatus(liveKey, allowedStatuses, patch)) {
+      throw this.abortError()
     }
   }
 
@@ -263,18 +304,33 @@ export class DownloaderService {
       await fsp.rename(tmpPath, targetPath)
       return buffer.byteLength
     } catch (err) {
-      if (signal.aborted) throw err
+      if (signal.aborted) {
+        await fsp.rm(tmpPath, { force: true }).catch(() => {})
+        throw this.abortError()
+      }
       if (retries > 0) {
         console.warn(`[downloader] Segment download failed, retrying... (${retries} left): ${url}`)
-        await new Promise(resolve => setTimeout(resolve, 1000))
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort)
+            resolve()
+          }, 1000)
+          const onAbort = () => {
+            clearTimeout(timer)
+            reject(this.abortError())
+          }
+          signal.addEventListener('abort', onAbort, { once: true })
+        })
         return this.downloadSegment(url, targetPath, signal, retries - 1)
       }
       throw err
     }
   }
 
-  private async parseM3U8(streamUrl: string, existingText?: string) {
-    const text = existingText || (await (await this.bilibiliClient.fetchWithCookies(streamUrl)).text())
+  private async parseM3U8(streamUrl: string, existingText: string | undefined, signal: AbortSignal) {
+    signal.throwIfAborted()
+    const text = existingText || (await (await this.bilibiliClient.fetchWithCookies(streamUrl, { signal })).text())
+    signal.throwIfAborted()
     const lines = text.split(/\r?\n/)
     const base = streamUrl.slice(0, streamUrl.lastIndexOf('/') + 1)
     const segments: M3U8Segment[] = []
@@ -304,49 +360,80 @@ export class DownloaderService {
     }
 
     const tempPath = `${outputPath}.ts.tmp`
-    const outStream = createWriteStream(tempPath)
     let written = 0
 
     try {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          signal.addEventListener('abort', () => { reject(new Error('aborted')) }, { once: true })
-          outStream.on('error', reject)
+      await new Promise<void>((resolve, reject) => {
+        const outStream = createWriteStream(tempPath)
+        let currentStream: ReturnType<typeof createReadStream> | null = null
+        let settled = false
 
-          const appendNext = (idx: number) => {
-            if (signal.aborted) return
-            if (idx >= segmentFiles.length) {
-              outStream.end(() => resolve())
-              return
-            }
-            const fullPath = segmentFiles[idx]
-            if (!fs.existsSync(fullPath)) {
-              appendNext(idx + 1)
-              return
-            }
-            const rs = createReadStream(fullPath)
-          rs.on('data', (chunk: string | Buffer) => {
+        const cleanup = () => {
+          signal.removeEventListener('abort', onAbort)
+          outStream.removeListener('error', fail)
+        }
+        const succeed = () => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve()
+        }
+        const fail = (error: unknown) => {
+          if (settled) return
+          settled = true
+          cleanup()
+          currentStream?.destroy()
+          const rejectAfterClose = () => reject(error)
+          if (outStream.closed) {
+            rejectAfterClose()
+          } else {
+            outStream.once('close', rejectAfterClose)
+            outStream.destroy()
+          }
+        }
+        const onAbort = () => fail(this.abortError())
+
+        const appendNext = (idx: number) => {
+          if (signal.aborted) {
+            onAbort()
+            return
+          }
+          if (idx >= segmentFiles.length) {
+            outStream.once('close', succeed)
+            outStream.end()
+            return
+          }
+          const fullPath = segmentFiles[idx]
+          if (!fs.existsSync(fullPath)) {
+            fail(new Error(`Replay segment is missing: ${fullPath}`))
+            return
+          }
+          currentStream = createReadStream(fullPath)
+          currentStream.on('data', (chunk: string | Buffer) => {
             written += chunk.length
             const mergeProgress = totalBytes > 0 ? Math.max(0, Math.min(100, (written / totalBytes) * 100)) : 0
             this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: mergeProgress, message: `合并临时碎片... ${Math.round(mergeProgress)}%` })
           })
-          rs.on('end', () => appendNext(idx + 1))
-            rs.on('error', reject)
-            rs.pipe(outStream, { end: false })
-          }
-          appendNext(0)
-        })
-      } finally {
-        outStream.close()
-      }
+          currentStream.once('end', () => {
+            currentStream = null
+            appendNext(idx + 1)
+          })
+          currentStream.once('error', fail)
+          currentStream.pipe(outStream, { end: false })
+        }
 
-      if (signal.aborted) return
-  
-    this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: 0, message: '转换MP4格式中 (0%)...' })
-    await this.remuxTsToMp4(tempPath, outputPath, signal, (pct) => {
-      this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: pct, message: `转换MP4格式中 (${pct}%)...` })
-    }, expectedSeconds)
-  } finally {
+        signal.addEventListener('abort', onAbort, { once: true })
+        outStream.once('error', fail)
+        appendNext(0)
+      })
+
+      if (signal.aborted) throw this.abortError()
+
+      this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: 0, message: '转换MP4格式中 (0%)...' })
+      await this.remuxTsToMp4(tempPath, outputPath, signal, (pct) => {
+        this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: pct, message: `转换MP4格式中 (${pct}%)...` })
+      }, expectedSeconds)
+    } finally {
       await fsp.rm(tempPath, { force: true }).catch(() => {})
     }
   }
@@ -356,6 +443,10 @@ export class DownloaderService {
     
     const runFfmpeg = (extraArgs: string[]) => {
       return new Promise<void>((resolve, reject) => {
+        if (signal.aborted) {
+          reject(this.abortError())
+          return
+        }
         const proc = spawn(ffmpegBin, [
           '-i', tsPath,
           '-c', 'copy',
@@ -386,11 +477,12 @@ export class DownloaderService {
           proc.kill('SIGTERM')
         }
         signal.addEventListener('abort', onAbort, { once: true })
+        if (signal.aborted) onAbort()
 
         proc.on('close', (code) => {
           signal.removeEventListener('abort', onAbort)
           if (signal.aborted) {
-            reject(new Error('aborted'))
+            reject(this.abortError())
           } else if (code === 0) {
             resolve()
           } else {

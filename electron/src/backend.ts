@@ -9,6 +9,7 @@ import { WebSocketServer } from 'ws'
 import {
   AppConfig,
   ReplayRecord,
+  ReplayPatch,
   RuntimeSnapshot,
   ScanSummary,
   ProgressUpdate,
@@ -29,6 +30,24 @@ import { BilibiliClient, USER_AGENT } from './bilibili'
 import { DownloaderService } from './downloader'
 import { ClipService } from './clip'
 import { FeishuClient } from './feishu'
+import { registerBilibiliRoutes } from './routes/bilibili'
+import { registerSystemRoutes } from './routes/system'
+import { registerReplayRoutes } from './routes/replays'
+import { registerClipRoutes } from './routes/clip'
+import { registerFeishuRoutes } from './routes/feishu'
+
+const ACTIVE_REPLAY_STATUSES = ['pending', 'downloading', 'merging'] as const
+
+function isAllowedLocalOrigin(origin: string | undefined) {
+  if (!origin || origin === 'null') return true
+  try {
+    const parsed = new URL(origin)
+    return ['http:', 'https:'].includes(parsed.protocol)
+      && ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname)
+  } catch {
+    return false
+  }
+}
 
 export class DesktopBackend {
   public readonly baseDir: string
@@ -38,7 +57,7 @@ export class DesktopBackend {
   public readonly bilibiliClient: BilibiliClient
   public readonly downloaderService: DownloaderService
   public readonly clipService: ClipService
-  public readonly feishuClient: FeishuClient
+  public feishuClient: FeishuClient
 
   public readonly app = express()
   public readonly server = http.createServer(this.app)
@@ -47,8 +66,19 @@ export class DesktopBackend {
   public runtimePaused = false
   public readonly activeTasks = new Map<string, TaskHandle>()
   public readonly pausedTasks = new Set<string>()
+  public readonly runtimePausedTasks = new Set<string>()
+  public readonly deletingReplays = new Set<string>()
   public runningTasks = 0
   public readonly queue: string[] = []
+  private readonly replayTaskGenerations = new Map<string, number>()
+  public readonly clipTaskPromises = new Map<number, Promise<void>>()
+  public readonly clipTaskQueue: number[] = []
+  private readonly clipTaskRunners = new Map<number, (controller: AbortController) => Promise<void>>()
+  private stopPromise: Promise<void> | null = null
+  private configMutationQueue: Promise<void> = Promise.resolve()
+  private stopping = false
+  private mutationSequence = 0
+  private readonly inFlightMutations = new Map<number, { controller: AbortController; promise: Promise<void> }>()
 
   public diskStatsCache: {
     value: { path: string; total_bytes: number; free_bytes: number; used_by_service_bytes: number }
@@ -57,6 +87,7 @@ export class DesktopBackend {
   public diskStatsPromise: Promise<{
     path: string; total_bytes: number; free_bytes: number; used_by_service_bytes: number
   }> | null = null
+  public diskStatsGeneration = 0
 
   private constructor(baseDir: string, config: AppConfig, db: SqliteStore, customFetch?: typeof globalThis.fetch) {
     this.baseDir = baseDir
@@ -77,23 +108,48 @@ export class DesktopBackend {
 
     this.app.use(express.json({ limit: '2mb' }))
     this.app.use((req, res, next) => {
-      res.setHeader('Access-Control-Allow-Origin', '*')
+      const origin = req.headers.origin
+      if (!isAllowedLocalOrigin(origin)) {
+        res.status(403).json({ error: 'Origin not allowed' })
+        return
+      }
+      if (origin) {
+        res.setHeader('Access-Control-Allow-Origin', origin)
+        res.setHeader('Vary', 'Origin')
+      }
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS')
       if (req.method === 'OPTIONS') {
         res.status(204).end()
         return
       }
       next()
     })
+    this.app.use((_req, res, next) => {
+      if (this.stopping) {
+        res.status(503).json({ error: 'Backend is shutting down' })
+        return
+      }
+      next()
+    })
     this.registerRoutes()
     this.server.on('upgrade', (req, socket, head) => {
-      if (req.url !== '/ws') {
+      if (req.url !== '/ws' || !isAllowedLocalOrigin(req.headers.origin)) {
         socket.destroy()
         return
       }
       this.wss.handleUpgrade(req, socket, head, ws => {
         ws.send(JSON.stringify({ live_key: '', progress: 0, merge_progress: 0, status: 'idle', message: 'connected', speed: '', speed_history: [], elapsed: '', eta: '' }))
+        ws.on('message', raw => {
+          try {
+            const message = JSON.parse(raw.toString()) as { type?: string }
+            if (message.type === 'ping' && ws.readyState === ws.OPEN) {
+              ws.send(JSON.stringify({ type: 'pong' }))
+            }
+          } catch {
+            // Ignore malformed client messages; progress is server-driven.
+          }
+        })
       })
     })
   }
@@ -105,10 +161,73 @@ export class DesktopBackend {
     return new DesktopBackend(baseDir, config, db, customFetch)
   }
 
+  public updateConfig(mutator: (draft: AppConfig) => AppConfig | void): Promise<AppConfig> {
+    const operation = this.configMutationQueue.then(async () => {
+      const previous = structuredClone(this.config)
+      const draft = structuredClone(this.config)
+      const candidate = mutator(draft) ?? draft
+      const normalized = normalizeConfigWithBase(this.baseDir, candidate)
+
+      ensureDir(normalized.download.output_dir)
+      ensureDir(normalized.download.temp_dir)
+      ensureDir(normalized.download.clip_output_dir)
+      ensureDir(path.join(normalized.download.output_dir, 'covers'))
+      await saveConfigFile(this.baseDir, this.configPath, normalized)
+
+      for (const key of Object.keys(this.config)) delete (this.config as any)[key]
+      Object.assign(this.config, normalized)
+      if (JSON.stringify(previous.feishu) !== JSON.stringify(normalized.feishu)) {
+        this.feishuClient = new FeishuClient(this.config.feishu)
+      }
+      this.diskStatsGeneration += 1
+      this.diskStatsCache = null
+      this.diskStatsPromise = null
+      this.scheduleQueue()
+      this.scheduleClipTasks()
+      return structuredClone(this.config)
+    })
+    this.configMutationQueue = operation.then(() => undefined, () => undefined)
+    return operation
+  }
+
+  public beginMutation() {
+    if (this.stopping) {
+      throw new Error('Backend is shutting down')
+    }
+    const id = ++this.mutationSequence
+    const controller = new AbortController()
+    let resolvePromise!: () => void
+    const promise = new Promise<void>(resolve => { resolvePromise = resolve })
+    this.inFlightMutations.set(id, { controller, promise })
+    let finished = false
+    return {
+      signal: controller.signal,
+      finish: () => {
+        if (finished) return
+        finished = true
+        this.inFlightMutations.delete(id)
+        resolvePromise()
+      },
+    }
+  }
+
   async listen() {
     this.db.cleanupCorruptedReplays()
-    await new Promise<void>(resolve => {
-      this.server.listen(this.config.server.port, '127.0.0.1', () => resolve())
+    this.db.healDeletedReplays(this.baseDir)
+    this.db.cleanupStaleClipTasks()
+    this.db.healMissingClipFiles(this.baseDir)
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        this.server.off('listening', onListening)
+        reject(error)
+      }
+      const onListening = () => {
+        this.server.off('error', onError)
+        resolve()
+      }
+      this.server.once('error', onError)
+      this.server.once('listening', onListening)
+      this.server.listen(this.config.server.port, '127.0.0.1')
     })
     this.recoverInterruptedTasks()
     const addr = this.server.address()
@@ -119,605 +238,59 @@ export class DesktopBackend {
   }
 
   async stop() {
-    await new Promise<void>(resolve => this.wss.close(() => resolve()))
-    await new Promise<void>(resolve => this.server.close(() => resolve()))
+    if (!this.stopPromise) this.stopPromise = this.stopInternal()
+    await this.stopPromise
+  }
+
+  private async stopInternal() {
+    this.stopping = true
+    this.runtimePaused = true
+    this.queue.splice(0, this.queue.length)
+    for (const taskId of this.clipTaskQueue.splice(0, this.clipTaskQueue.length)) {
+      this.clipTaskRunners.delete(taskId)
+      this.db.updateClipTask(taskId, { status: 'error', message: 'App closed before processing', file_path: '' })
+      this.emitClipTaskUpdate(taskId)
+    }
+
+    const replayPromises = [...this.activeTasks.values()].map(handle => handle.promise)
+    const clipPromises = [...this.clipTaskPromises.values()]
+    const mutationPromises = [...this.inFlightMutations.values()].map(handle => handle.promise)
+    for (const handle of this.activeTasks.values()) handle.controller.abort()
+    for (const controller of this.clipTasksAbort.values()) controller.abort()
+    for (const mutation of this.inFlightMutations.values()) mutation.controller.abort()
+
+    for (const client of this.wss.clients) client.terminate()
+    const websocketClosed = new Promise<void>(resolve => {
+      try {
+        this.wss.close(() => resolve())
+      } catch {
+        resolve()
+      }
+    })
+
+    const serverClosed = new Promise<void>(resolve => {
+      if (!this.server.listening) {
+        resolve()
+        return
+      }
+      this.server.close(() => resolve())
+      this.server.closeIdleConnections?.()
+    })
+
+    await Promise.allSettled([...replayPromises, ...clipPromises, ...mutationPromises, this.configMutationQueue])
+    this.server.closeAllConnections?.()
+    await Promise.all([websocketClosed, serverClosed])
     await this.db.close()
   }
 
   // ──────────────────────────── Routes ────────────────────────────
 
   public registerRoutes() {
-    this.app.get('/api/health', (_req, res) => {
-      res.json({ ok: true })
-    })
-
-    this.app.get('/api/runtime', (_req, res) => {
-      res.json(this.getRuntime())
-    })
-
-    this.app.get('/api/config', (_req, res) => {
-      res.json(this.config)
-    })
-
-    this.app.post('/api/config', async (req, res) => {
-      try {
-        const previous = this.config
-        const incoming = req.body as Partial<AppConfig>
-        const next = deepMerge(this.config, incoming)
-        next.server = previous.server
-        next.database = previous.database
-        const normalized = normalizeConfigWithBase(this.baseDir, next)
-        for (const key of Object.keys(this.config)) delete (this.config as any)[key]
-        Object.assign(this.config, normalized)
-        ensureDir(this.config.download.output_dir)
-        ensureDir(this.config.download.temp_dir)
-        ensureDir(path.join(this.config.download.output_dir, 'covers'))
-        await saveConfigFile(this.baseDir, this.configPath, this.config)
-        res.setHeader('x-migrated-files', '0')
-        res.setHeader('x-renamed-files', '0')
-        res.json(this.config)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/replays', (_req, res) => {
-      try {
-        res.setHeader('Cache-Control', 'no-store')
-        res.json(this.db.getReplays(this.baseDir))
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/me', async (_req, res) => {
-      try {
-        const me = await this.bilibiliClient.getCurrentUser()
-        res.json(me)
-      } catch {
-        res.json({ logged_in: false, uname: '', face: '' })
-      }
-    })
-
-    this.app.get('/api/login/qr', async (_req, res) => {
-      try {
-        const data = await this.bilibiliClient.fetchJSON<{
-          code: number
-          message: string
-          data: { url: string; qrcode_key: string }
-        }>('https://passport.bilibili.com/x/passport-login/web/qrcode/generate')
-        if (data.code !== 0) {
-          throw new Error(data.message || 'Generate QR failed')
-        }
-        res.json(data.data)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/login/poll', async (req, res) => {
-      try {
-        const key = String(req.query.qrcode_key || '')
-        if (!key) {
-          res.status(400).json({ error: 'missing qrcode_key' })
-          return
-        }
-        const data = await this.bilibiliClient.fetchJSON<{
-          data: { code: number }
-        }>(`https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key=${encodeURIComponent(key)}`)
-        await this.bilibiliClient.saveCookies()
-        res.json({ code: safeNumber(data?.data?.code) })
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.post('/api/scan', async (_req, res) => {
-      try {
-        const summary = await this.scanReplays()
-        res.json(summary)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.post('/api/pause-all', (_req, res) => {
-      const count = this.pauseAll()
-      res.json({ ok: true, count })
-    })
-
-    this.app.post('/api/resume-all', (_req, res) => {
-      const count = this.resumeAll()
-      res.json({ ok: true, count })
-    })
-
-    this.app.post('/api/cleanup-stale', (_req, res) => {
-      const result = this.db
-        .prepare(
-          `UPDATE bilibili_replays
-           SET status = 'paused',
-               message = 'Reset by cleanup-stale',
-               progress = 0,
-               speed = '',
-               elapsed = '',
-               eta = '',
-               updated_at = ?
-           WHERE status IN ('pending', 'downloading', 'merging')`,
-        )
-        .run(new Date().toISOString())
-      res.json({ count: result.changes })
-    })
-
-    this.app.post('/api/cleanup-streams', (_req, res) => {
-      const result = this.db.prepare('DELETE FROM stream_slices WHERE replay_id NOT IN (SELECT replay_id FROM bilibili_replays)').run()
-      res.json({ count: result.changes })
-    })
-
-    this.app.post('/api/sync-all', (_req, res) => {
-      const count = this.syncAllPending()
-      res.json({ ok: true, count })
-    })
-
-    this.app.post('/api/download-unfinished', (_req, res) => {
-      const count = this.downloadUnfinished()
-      res.json({ ok: true, count })
-    })
-
-    this.app.post('/api/retry-failed', (_req, res) => {
-      const count = this.retryFailed()
-      res.json({ ok: true, count })
-    })
-
-    this.app.post('/api/replays/:liveKey/download', (req, res) => {
-      const replay = this.db.getReplayByLiveKey(this.baseDir, String(req.params.liveKey))
-      if (!replay) {
-        res.status(404).json({ error: 'Replay not found' })
-        return
-      }
-      this.pausedTasks.delete(replay.live_key)
-      this.enqueueReplay(replay.live_key, { resetProgress: replay.status !== 'paused', message: 'Queued' })
-      res.json({ ok: true })
-    })
-
-    this.app.post('/api/replays/:liveKey/pause', (req, res) => {
-      const ok = this.pauseReplay(String(req.params.liveKey))
-      res.json({ ok })
-    })
-
-    this.app.post('/api/replays/:liveKey/resume', (req, res) => {
-      const ok = this.resumeReplay(String(req.params.liveKey))
-      res.json({ ok })
-    })
-
-    this.app.post('/api/replays/:liveKey/cache-m3u8', async (req, res) => {
-      try {
-        const liveKey = String(req.params.liveKey)
-        const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
-        if (!replay) {
-          res.status(404).json({ error: 'Replay not found' })
-          return
-        }
-        await this.bilibiliClient.cacheReplayM3U8(replay)
-        res.json(this.db.getReplayByLiveKey(this.baseDir, liveKey))
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.post('/api/replays/:liveKey/delete-file', async (req, res) => {
-      try {
-        const replay = this.db.getReplayByLiveKey(this.baseDir, String(req.params.liveKey))
-        if (!replay) {
-          res.status(404).json({ error: 'Replay not found' })
-          return
-        }
-        const target = replay.file_path
-        if (target && fs.existsSync(target)) {
-          await fsp.unlink(target)
-        }
-        this.removeFromQueue(replay.live_key)
-        const active = this.activeTasks.get(replay.live_key)
-        if (active) {
-          active.controller.abort()
-        }
-        try {
-          const tempDir = this.config.download.temp_dir
-          if (fs.existsSync(tempDir)) {
-            const files = fs.readdirSync(tempDir)
-            const prefix = `${replay.live_key}_stream`
-            for (const f of files) {
-              if (f.startsWith(prefix)) {
-                await fsp.rm(path.join(tempDir, f), { recursive: true, force: true }).catch(() => {})
-              }
-            }
-          }
-        } catch {}
-        this.db
-          .prepare(
-            `UPDATE bilibili_replays
-             SET file_path = '',
-                 file_size = 0,
-                 status = 'deleted',
-                 message = 'Local file deleted',
-                 updated_at = ?
-             WHERE live_key = ?`,
-          )
-          .run(new Date().toISOString(), replay.live_key)
-        res.json(this.db.getReplayByLiveKey(this.baseDir, replay.live_key))
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/stats/disk', async (_req, res) => {
-      try {
-        const stats = await this.getDiskStats()
-        res.json(stats)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/fs/list', async (req, res) => {
-      try {
-        res.json(await this.listDirectories(String(req.query.path || '')))
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/export-tsv', (_req, res) => {
-      const rows = this.db.getReplays(this.baseDir)
-      const lines = [
-        ['live_key', 'title', 'status', 'start_time', 'end_time', 'duration', 'file_path'].join('\t'),
-        ...rows.map(row =>
-          [
-            row.live_key,
-            row.title.replaceAll('\t', ' '),
-            row.status,
-            `${row.start_time}`,
-            `${row.end_time}`,
-            `${row.duration}`,
-            row.file_path.replaceAll('\t', ' '),
-          ].join('\t'),
-        ),
-      ]
-      res.type('text/plain; charset=utf-8').send(lines.join('\n'))
-    })
-
-    this.app.get('/api/avatar', async (req, res) => {
-      try {
-        const raw = String(req.query.url || '')
-        const target = new URL(raw)
-        if (!target.hostname.endsWith('hdslb.com')) {
-          res.status(400).json({ error: 'host not allowed' })
-          return
-        }
-        const response = await fetch(target, {
-          headers: {
-            'user-agent': USER_AGENT,
-            referer: 'https://www.bilibili.com/',
-          },
-        })
-        res.status(response.status)
-        res.setHeader('content-type', response.headers.get('content-type') || 'application/octet-stream')
-        res.send(Buffer.from(await response.arrayBuffer()))
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/covers/*', (req, res) => {
-      const relative = decodeURIComponent(req.path.replace(/^\/covers\//, ''))
-      const fullPath = path.resolve(path.join(this.config.download.output_dir, 'covers', relative))
-      const coverDir = path.resolve(path.join(this.config.download.output_dir, 'covers'))
-      if (!fullPath.startsWith(coverDir)) {
-        res.status(400).json({ error: 'invalid path' })
-        return
-      }
-      if (!fs.existsSync(fullPath)) {
-        res.status(404).end()
-        return
-      }
-      res.sendFile(fullPath)
-    })
-
-    // --- 视频切片 API ---
-    // Cover image proxy — fetches external B站 cover images to avoid mixed-content blocks
-    this.app.get('/api/clip/cover-proxy', async (req, res) => {
-      try {
-        const url = req.query.url as string
-        if (!url) throw new Error('Missing cover URL')
-        // Validate URL domain to prevent SSRF
-        try {
-          const parsed = new URL(url)
-          const allowed = ['hdslb.com', 'bilibili.com', 'bilivideo.com', 'biliimg.com', 'akamaized.net']
-          if (!allowed.some(d => parsed.hostname === d || parsed.hostname.endsWith('.' + d))) {
-            res.status(400).json({ error: 'Domain not allowed' })
-            return
-          }
-        } catch { res.status(400).json({ error: 'Invalid URL' }); return }
-        const response = await fetch(url, { headers: { 'Referer': 'https://www.bilibili.com/' } })
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
-        const contentType = response.headers.get('content-type') || 'image/jpeg'
-        res.setHeader('content-type', contentType)
-        res.setHeader('cache-control', 'public, max-age=86400')
-        const buffer = Buffer.from(await response.arrayBuffer())
-        res.send(buffer)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    // Clip output directory config
-    this.app.get('/api/clip/output-dir', (req, res) => {
-      const clipDir = resolveAppPathWithBase(this.baseDir, this.config.download.clip_output_dir || path.join(this.config.download.output_dir, 'clips'))
-      res.json({ path: clipDir })
-    })
-
-    this.app.post('/api/clip/output-dir', (req, res) => {
-      try {
-        const newDir = req.body.path as string
-        if (!newDir) throw new Error('Missing path')
-        this.config.download.clip_output_dir = newDir
-        ensureDir(resolveAppPathWithBase(this.baseDir, newDir))
-        res.json({ ok: true, path: resolveAppPathWithBase(this.baseDir, newDir) })
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.post('/api/clip/info', async (req, res) => {
-      try {
-        const info = await this.bilibiliClient.getBilibiliVideoInfo(req.body.url || '')
-        const audioProxyPath = `/api/clip/audio-proxy?url=${encodeURIComponent(info.audioUrl)}`
-        // Proxy the cover image through our backend to avoid mixed-content blocks
-        const coverProxy = info.cover ? `/api/clip/cover-proxy?url=${encodeURIComponent(info.cover)}` : ''
-        res.json({ ...info, cover: coverProxy, audioProxyPath })
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/clip/audio-proxy', async (req, res) => {
-      try {
-        const url = req.query.url as string
-        const start = Number(req.query.start) || 0
-        const duration = Number(req.query.duration) || 0
-        if (!url) throw new Error('Missing audio URL')
-        
-        if (duration > 0) {
-          res.setHeader('content-type', 'audio/mpeg')
-          // Use child_process.spawn directly because fluent-ffmpeg doesn't properly quote -headers
-          const cookie = this.bilibiliClient.cookieHeader()
-          const headers = `Referer: https://www.bilibili.com/\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\r\nCookie: ${cookie}\r\n`
-          const ffmpegPath = (require('ffmpeg-static') || '').replace('app.asar', 'app.asar.unpacked')
-          const { spawn } = require('node:child_process')
-          const args = [
-            '-ss', `${start}`,
-            '-headers', headers,
-            '-i', url,
-            '-t', `${duration}`,
-            '-f', 'mp3',
-            '-c:a', 'libmp3lame',
-            '-b:a', '32k',
-            '-ar', '8000',
-            '-ac', '1',
-            'pipe:1'
-          ]
-          console.log('[audio-proxy] spawning ffmpeg')
-          const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-          proc.stdout.pipe(res)
-          proc.stderr.on('data', (d: Buffer) => {
-            const msg = d.toString()
-            if (msg.includes('Error') || msg.includes('error')) console.error('[audio-proxy] ffmpeg stderr:', msg)
-          })
-          proc.on('error', (err: Error) => {
-            console.error('[audio-proxy] spawn error:', err)
-            if (!res.headersSent) res.status(500).json({ error: err.message })
-          })
-          proc.on('close', (code: number | null) => {
-            if (code !== 0 && code !== null) console.error('[audio-proxy] ffmpeg exited with code', code)
-            res.end()
-          })
-          req.on('close', () => {
-            proc.kill()
-          })
-          return
-        }
-
-        // For non-duration requests, stream directly via authenticated fetch
-        const response = await this.bilibiliClient.fetchWithCookies(url)
-        res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
-        res.setHeader('content-length', response.headers.get('content-length') || '')
-        res.setHeader('accept-ranges', 'bytes')
-        if (response.body) {
-          const { Readable } = require('node:stream')
-          Readable.fromWeb(response.body).pipe(res)
-        } else {
-          const buffer = Buffer.from(await response.arrayBuffer())
-          res.send(buffer)
-        }
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/clip/tasks', (req, res) => {
-      res.json(this.db.getClipTasks())
-    })
-
-    this.app.post('/api/clip/execute', async (req, res) => {
-      try {
-        const { url, title, startTime, endTime, audioQualityIndex, videoQualityIndex, prefixCut, suffixTime, clipMode } = req.body
-        const taskId = this.db.createClipTask({
-          url,
-          title: title || 'Clip',
-          start_time: Number(startTime) || 0,
-          end_time: Number(endTime) || 0
-        })
-
-        res.json({ taskId, status: 'pending' })
-
-        const controller = new AbortController()
-        this.clipTasksAbort.set(taskId, controller)
-
-        // Execute in background
-        this.clipService.executeClip(
-          url, title, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
-          (progress, message) => {
-            this.db.updateClipTask(taskId, { progress, status: 'processing', message: message || '' })
-            this.emitClipTaskUpdate(taskId)
-          },
-          prefixCut !== false,
-          suffixTime !== false,
-          clipMode || 'copy',
-          controller.signal
-        ).then(result => {
-          this.clipTasksAbort.delete(taskId)
-          const r = result as { path: string; message?: string }
-          this.db.updateClipTask(taskId, { progress: 100, status: 'done', file_path: r.path, message: r.message || '' })
-          this.emitClipTaskUpdate(taskId)
-        }).catch(error => {
-          this.clipTasksAbort.delete(taskId)
-          this.db.updateClipTask(taskId, { status: 'error', message: error.message })
-          this.emitClipTaskUpdate(taskId)
-        })
-
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.post('/api/clip/cancel/:taskId', (req, res) => {
-      const taskId = Number(req.params.taskId)
-      const controller = this.clipTasksAbort.get(taskId)
-      if (controller) {
-        controller.abort()
-        res.json({ ok: true })
-      } else {
-        res.status(404).json({ error: 'Task not found or already finished' })
-      }
-    })
-
-    // Open a file with system default app
-    this.app.post('/api/clip/open-file', async (req, res) => {
-      try {
-        const { filePath } = req.body
-        if (!filePath || !fs.existsSync(filePath)) {
-          res.status(404).json({ ok: false, message: 'File not found' })
-          return
-        }
-        try {
-          const { shell } = require('electron')
-          await shell.openPath(filePath)
-        } catch {
-          const { exec } = await import('node:child_process')
-          exec(`start "" "${filePath.replace(/"/g, '')}"`)  
-        }
-        res.json({ ok: true })
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    // Open file's parent folder in explorer with the file selected
-    this.app.post('/api/clip/open-folder', async (req, res) => {
-      try {
-        const { filePath } = req.body
-        if (!filePath) {
-          res.status(400).json({ ok: false, message: 'filePath is required' })
-          return
-        }
-        try {
-          const { shell } = require('electron')
-          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-            shell.showItemInFolder(filePath)
-          } else {
-            const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
-            await shell.openPath(dir)
-          }
-        } catch {
-          const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
-          const { exec } = await import('node:child_process')
-          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-            exec(`explorer /select,"${filePath.replace(/"/g, '')}"`)  
-          } else {
-            exec(`explorer "${dir.replace(/"/g, '')}"`)  
-          }
-        }
-        res.json({ ok: true })
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    // --- 飞书多维表格 API ---
-    this.app.get('/api/feishu/status', async (_req, res) => {
-      try {
-        const status = await this.feishuClient.checkStatus()
-        res.json(status)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.post('/api/feishu/config', async (req, res) => {
-      try {
-        const { app_id, app_secret } = req.body
-        if (!app_id || !app_secret) {
-          res.status(400).json({ error: 'Missing app_id or app_secret' })
-          return
-        }
-        // Update config and save
-        this.config.feishu.app_id = app_id
-        this.config.feishu.app_secret = app_secret
-        await saveConfigFile(this.baseDir, this.configPath, this.config)
-        // Reinitialize the client with new credentials
-        ;(this as any).feishuClient = new FeishuClient(this.config.feishu)
-        // Verify the new config works
-        const status = await this.feishuClient.checkStatus()
-        res.json(status)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.get('/api/feishu/records', async (req, res) => {
-      try {
-        const pageToken = (req.query.page_token as string) || undefined
-        const limit = Math.min(Number(req.query.limit) || 20, 200)
-        const keyword = ((req.query.keyword as string) || '').trim().toLowerCase()
-        const result = await this.feishuClient.listClippableRecords(pageToken, limit)
-
-        // Client-side keyword filtering (server filter doesn't support rich-text 'contains')
-        if (keyword) {
-          result.records = result.records.filter(r =>
-            r.song_name.toLowerCase().includes(keyword)
-          )
-          result.total = result.records.length
-        }
-
-        res.json(result)
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
-
-    this.app.put('/api/feishu/records/:recordId', async (req, res) => {
-      try {
-        const { recordId } = req.params
-        const { fields } = req.body
-        if (!recordId || !fields || typeof fields !== 'object') {
-          res.status(400).json({ error: 'Missing recordId or fields' })
-          return
-        }
-        await this.feishuClient.updateRecord(recordId, fields)
-        res.json({ ok: true })
-      } catch (error) {
-        this.sendError(res, error)
-      }
-    })
+    registerSystemRoutes(this)
+    registerBilibiliRoutes(this)
+    registerReplayRoutes(this)
+    registerClipRoutes(this)
+    registerFeishuRoutes(this)
   }
 
   public emitClipTaskUpdate(taskId: number) {
@@ -770,16 +343,18 @@ export class DesktopBackend {
   }
 
   public emitProgress(update: Partial<ProgressUpdate> & Pick<ProgressUpdate, 'live_key' | 'status'>) {
+    const replay = this.db.getReplayByLiveKey(this.baseDir, update.live_key)
     const payload: ProgressUpdate = {
       live_key: update.live_key,
-      progress: update.progress ?? 0,
+      updated_at: replay?.UpdatedAt ?? update.updated_at ?? new Date().toISOString(),
+      progress: replay?.progress ?? update.progress ?? 0,
       merge_progress: update.merge_progress ?? 0,
-      status: update.status,
-      message: update.message ?? '',
-      speed: update.speed ?? '',
+      status: replay?.status ?? update.status,
+      message: replay?.message ?? update.message ?? '',
+      speed: replay?.speed ?? update.speed ?? '',
       speed_history: update.speed_history ?? [],
-      elapsed: update.elapsed ?? '',
-      eta: update.eta ?? '',
+      elapsed: replay?.elapsed ?? update.elapsed ?? '',
+      eta: replay?.eta ?? update.eta ?? '',
     }
     const raw = JSON.stringify(payload)
     for (const client of this.wss.clients) {
@@ -789,34 +364,119 @@ export class DesktopBackend {
     }
   }
 
+  public enqueueClipTask(taskId: number, runner: (controller: AbortController) => Promise<void>) {
+    if (this.stopping || this.clipTaskRunners.has(taskId) || this.clipTaskPromises.has(taskId)) return false
+    this.clipTaskRunners.set(taskId, runner)
+    this.clipTaskQueue.push(taskId)
+    this.scheduleClipTasks()
+    return true
+  }
+
+  public cancelClipTask(taskId: number) {
+    const queuedIndex = this.clipTaskQueue.indexOf(taskId)
+    if (queuedIndex >= 0) {
+      this.clipTaskQueue.splice(queuedIndex, 1)
+      this.clipTaskRunners.delete(taskId)
+      this.db.updateClipTask(taskId, { status: 'error', message: 'Cancelled', file_path: '' })
+      this.emitClipTaskUpdate(taskId)
+      return true
+    }
+
+    const controller = this.clipTasksAbort.get(taskId)
+    if (controller) {
+      controller.abort()
+      this.db.updateClipTask(taskId, { status: 'error', message: 'Cancelled', file_path: '' })
+      this.emitClipTaskUpdate(taskId)
+      return true
+    }
+    const task = this.db.getClipTasks().find(candidate => candidate.id === taskId)
+    return task?.status === 'error' && task.message === 'Cancelled'
+  }
+
+  private scheduleClipTasks() {
+    const limit = Math.max(1, this.config.download.max_concurrent_tasks)
+    while (!this.stopping && this.clipTaskPromises.size < limit && this.clipTaskQueue.length > 0) {
+      const taskId = this.clipTaskQueue.shift()!
+      const runner = this.clipTaskRunners.get(taskId)
+      this.clipTaskRunners.delete(taskId)
+      if (!runner) continue
+
+      const controller = new AbortController()
+      this.clipTasksAbort.set(taskId, controller)
+      this.db.updateClipTask(taskId, { status: 'processing', message: 'Starting...' })
+      this.emitClipTaskUpdate(taskId)
+      let execution!: Promise<void>
+      execution = Promise.resolve()
+        .then(() => runner(controller))
+        .finally(() => {
+          if (this.clipTasksAbort.get(taskId) === controller) this.clipTasksAbort.delete(taskId)
+          if (this.clipTaskPromises.get(taskId) === execution) this.clipTaskPromises.delete(taskId)
+          this.scheduleClipTasks()
+        })
+      this.clipTaskPromises.set(taskId, execution)
+    }
+  }
+
+  public emitReplayUpdate(liveKey: string, extras?: Partial<ProgressUpdate>) {
+    const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
+    if (!replay) return
+    this.emitProgress({ ...extras, live_key: liveKey, status: replay.status })
+  }
+
+  public updateReplayState(
+    liveKey: string,
+    patch: ReplayPatch,
+    allowedStatuses?: readonly string[],
+    extras?: Partial<ProgressUpdate>,
+  ) {
+    const changed = allowedStatuses
+      ? this.db.patchReplayIfStatus(liveKey, allowedStatuses, patch)
+      : this.db.patchReplay(liveKey, patch)
+    if (!changed) return null
+    this.emitReplayUpdate(liveKey, extras)
+    return this.db.getReplayByLiveKey(this.baseDir, liveKey)
+  }
+
   public enqueueReplay(liveKey: string, options?: { resetProgress?: boolean; message?: string }) {
+    if (this.stopping || this.deletingReplays.has(liveKey)) return false
+    this.db.healDeletedReplays(this.baseDir)
     const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
     if (!replay) return false
-    if (this.activeTasks.has(liveKey)) return true
+    const active = this.activeTasks.get(liveKey)
+    if (active && !active.controller.signal.aborted) return true
+    const queueableStatuses = ['not_downloaded', 'failed', 'deleted', 'paused', ...ACTIVE_REPLAY_STATUSES]
+    if (!queueableStatuses.includes(replay.status)) return false
     if (!this.queue.includes(liveKey)) {
       this.queue.push(liveKey)
     }
     const nextProgress = options?.resetProgress ? 0 : replay.progress
-    this.db.patchReplay(liveKey, {
+    const resetArtifact = replay.status === 'deleted' || replay.status === 'failed'
+    const updated = this.updateReplayState(liveKey, {
       status: 'pending',
       message: options?.message || 'Queued',
       progress: nextProgress,
       speed: '',
       elapsed: options?.resetProgress ? '' : replay.elapsed,
       eta: '',
+      ...(resetArtifact ? {
+        file_path: '',
+        file_size: 0,
+        resolution: '',
+        bitrate: '',
+        verify_ok: false,
+        actual_duration: 0,
+      } : {}),
     })
-    this.emitProgress({
-      live_key: liveKey,
-      status: 'pending',
-      progress: nextProgress,
-      message: options?.message || 'Queued',
-    })
+    if (!updated) {
+      this.removeFromQueue(liveKey)
+      return false
+    }
     this.scheduleQueue()
     return true
   }
 
   public scheduleQueue() {
-    while (!this.runtimePaused && this.runningTasks < this.config.download.max_concurrent_tasks && this.queue.length > 0) {
+    while (!this.stopping && !this.runtimePaused && this.runningTasks < this.config.download.max_concurrent_tasks && this.queue.length > 0) {
       let foundIndex = -1
       let targetKey: string | null = null
 
@@ -842,22 +502,38 @@ export class DesktopBackend {
         const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
         if (!replay) continue
         const controller = new AbortController()
+        const generation = (this.replayTaskGenerations.get(liveKey) || 0) + 1
+        this.replayTaskGenerations.set(liveKey, generation)
+        const handle: TaskHandle = { controller, generation, promise: Promise.resolve() }
+        const isSameExecution = () => {
+          const current = this.activeTasks.get(liveKey)
+          return current?.generation === generation && current.controller === controller
+        }
+        this.activeTasks.set(liveKey, handle)
         this.runningTasks += 1
-        const promise = this.downloaderService.processReplayTask(liveKey, controller.signal, this.baseDir)
+        const promise = this.downloaderService.processReplayTask(
+          liveKey,
+          controller.signal,
+          this.baseDir,
+          () => isSameExecution() && !controller.signal.aborted,
+        )
           .catch(error => {
-            if (error instanceof Error && (error.message === 'aborted' || error.name === 'AbortError')) {
-              return
-            }
+            if (controller.signal.aborted || !isSameExecution()) return
             const message = error instanceof Error ? error.message : 'Unknown error'
-            this.db.patchReplay(liveKey, { status: 'failed', message, speed: '', eta: '' })
-            this.emitProgress({ live_key: liveKey, status: 'failed', progress: 0, message })
+            this.updateReplayState(
+              liveKey,
+              { status: 'failed', message, speed: '', eta: '' },
+              ACTIVE_REPLAY_STATUSES,
+            )
           })
           .finally(() => {
-            this.runningTasks = Math.max(0, this.runningTasks - 1)
-            this.activeTasks.delete(liveKey)
+            if (isSameExecution()) {
+              this.runningTasks = Math.max(0, this.runningTasks - 1)
+              this.activeTasks.delete(liveKey)
+            }
             this.scheduleQueue()
           })
-        this.activeTasks.set(liveKey, { controller, promise })
+        handle.promise = promise
       } else {
         break
       }
@@ -867,21 +543,25 @@ export class DesktopBackend {
   public pauseReplay(liveKey: string) {
     const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
     if (!replay) return false
+    if (replay.status === 'paused') {
+      this.pausedTasks.add(liveKey)
+      this.removeFromQueue(liveKey)
+      this.activeTasks.get(liveKey)?.controller.abort()
+      return true
+    }
+    if (!ACTIVE_REPLAY_STATUSES.includes(replay.status as typeof ACTIVE_REPLAY_STATUSES[number])) return false
     this.pausedTasks.add(liveKey)
     this.removeFromQueue(liveKey)
-    this.db.patchReplay(liveKey, {
+    const updated = this.updateReplayState(liveKey, {
       status: 'paused',
       message: 'Paused',
       speed: '',
       eta: '',
-    })
-    this.emitProgress({
-      live_key: liveKey,
-      status: 'paused',
-      progress: replay.progress,
-      message: 'Paused',
-      elapsed: replay.elapsed,
-    })
+    }, ACTIVE_REPLAY_STATUSES)
+    if (!updated) {
+      this.pausedTasks.delete(liveKey)
+      return false
+    }
     const active = this.activeTasks.get(liveKey)
     if (active) {
       active.controller.abort()
@@ -890,8 +570,10 @@ export class DesktopBackend {
   }
 
   public resumeReplay(liveKey: string) {
+    if (this.stopping || this.deletingReplays.has(liveKey)) return false
     const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
-    if (!replay) return false
+    if (!replay || replay.status !== 'paused') return false
+    this.runtimePausedTasks.delete(liveKey)
     this.pausedTasks.delete(liveKey)
     return this.enqueueReplay(liveKey, { resetProgress: false, message: 'Resumed' })
   }
@@ -900,8 +582,13 @@ export class DesktopBackend {
     this.runtimePaused = true
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
-      if (['pending', 'downloading', 'merging', 'failed'].includes(replay.status)) {
+      if (replay.status === 'paused') {
+        this.pauseReplay(replay.live_key)
+        continue
+      }
+      if (ACTIVE_REPLAY_STATUSES.includes(replay.status as typeof ACTIVE_REPLAY_STATUSES[number])) {
         if (this.pauseReplay(replay.live_key)) {
+          this.runtimePausedTasks.add(replay.live_key)
           count += 1
         }
       }
@@ -910,20 +597,58 @@ export class DesktopBackend {
   }
 
   public resumeAll() {
+    if (this.stopping) return 0
     this.runtimePaused = false
     let count = 0
-    for (const replay of this.db.getReplays(this.baseDir)) {
-      if (replay.status === 'paused') {
-        if (this.resumeReplay(replay.live_key)) {
-          count += 1
-        }
+    const pausedByRuntime = [...this.runtimePausedTasks]
+    for (const liveKey of pausedByRuntime) {
+      this.runtimePausedTasks.delete(liveKey)
+      const replay = this.db.getReplayByLiveKey(this.baseDir, liveKey)
+      if (replay?.status === 'paused' && this.resumeReplay(liveKey)) {
+        count += 1
       }
     }
     this.scheduleQueue()
     return count
   }
 
+  public async cleanupStaleReplayTasks() {
+    const promises = new Set<Promise<void>>()
+    let count = 0
+    for (const replay of this.db.getReplays(this.baseDir)) {
+      if (!ACTIVE_REPLAY_STATUSES.includes(replay.status as typeof ACTIVE_REPLAY_STATUSES[number])) continue
+      this.pausedTasks.add(replay.live_key)
+      this.removeFromQueue(replay.live_key)
+      const updated = this.updateReplayState(
+        replay.live_key,
+        {
+          status: 'paused',
+          message: 'Reset by cleanup-stale',
+          progress: 0,
+          speed: '',
+          elapsed: '',
+          eta: '',
+        },
+        ACTIVE_REPLAY_STATUSES,
+      )
+      if (!updated) continue
+      count += 1
+      const active = this.activeTasks.get(replay.live_key)
+      if (active) {
+        active.controller.abort()
+        promises.add(active.promise)
+      }
+    }
+    for (const active of this.activeTasks.values()) {
+      active.controller.abort()
+      promises.add(active.promise)
+    }
+    await Promise.allSettled([...promises])
+    return count
+  }
+
   public retryFailed() {
+    if (this.stopping) return 0
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
       if (replay.status === 'failed') {
@@ -937,6 +662,7 @@ export class DesktopBackend {
   }
 
   public downloadUnfinished() {
+    if (this.stopping) return 0
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
       if (replay.status === 'not_downloaded') {
@@ -950,6 +676,7 @@ export class DesktopBackend {
   }
 
   public syncAllPending() {
+    if (this.stopping) return 0
     let count = 0
     for (const replay of this.db.getReplays(this.baseDir)) {
       if (replay.status === 'pending') {
@@ -973,10 +700,14 @@ export class DesktopBackend {
 
   // ──────────────────────── Scan / Covers ────────────────────────
 
-  public async scanReplays() {
+  public async scanReplays(signal?: AbortSignal): Promise<ScanSummary> {
+    signal?.throwIfAborted()
     if (!this.config.bilibili.anchor_id) {
       throw new Error('请先在设置中填写 Bilibili 主播 UID')
     }
+
+    const markedDeleted = this.db.healDeletedReplays(this.baseDir)
+
     const params = new URLSearchParams({
       live_uid: `${this.config.bilibili.anchor_id}`,
       time_range: '30',
@@ -998,66 +729,117 @@ export class DesktopBackend {
           video_info?: { duration?: number }
         }>
       }
-    }>(`https://api.live.bilibili.com/xlive/web-room/v1/videoService/GetOtherSliceList?${params.toString()}`)
+    }>(
+      `https://api.live.bilibili.com/xlive/web-room/v1/videoService/GetOtherSliceList?${params.toString()}`,
+      signal ? { signal } : undefined,
+    )
+    signal?.throwIfAborted()
     if (payload.code !== 0) {
       throw new Error(payload.message || 'Scan failed')
     }
 
     const rows = payload.data?.replay_info ?? []
-    let added = 0
-    let updated = 0
+    let newRecords = 0
+    let updatedRecords = 0
+    let coversUpdated = 0
+    let alreadyUpToDate = 0
 
     await this.db.withBatch(async () => {
       for (const r of rows) {
+        signal?.throwIfAborted()
         const existing = this.db.getReplayByLiveKey(this.baseDir, r.live_key)
-        const localCover = await this.downloadCover(r.live_key, r.live_info?.cover || '')
+        const title = r.live_info?.title || ''
+        const coverUrl = r.live_info?.cover || ''
+        const duration = r.video_info?.duration ?? 0
         if (!existing) {
+          const localCover = await this.downloadCover(r.live_key, coverUrl, false, signal)
           this.db.insertReplay({
             replay_id: r.replay_id,
             live_key: r.live_key,
             room_id: r.room_id,
-            title: r.live_info?.title || '',
+            title,
             start_time: r.start_time,
             end_time: r.end_time,
-            duration: r.video_info?.duration || 0,
-            cover_url: r.live_info?.cover || '',
+            duration,
+            cover_url: coverUrl,
             local_cover: localCover,
             status: 'not_downloaded',
             message: '',
           })
-          added++
+          newRecords += 1
         } else {
+          const coverPath = existing.local_cover
+            ? path.join(this.config.download.output_dir, 'covers', existing.local_cover)
+            : ''
+          const coverNeedsRefresh = Boolean(coverUrl) && (
+            coverUrl !== existing.cover_url
+            || !existing.local_cover
+            || !fs.existsSync(coverPath)
+          )
+          const downloadedCover = coverNeedsRefresh
+            ? await this.downloadCover(r.live_key, coverUrl, true, signal)
+            : ''
+          const localCover = downloadedCover || (coverUrl === existing.cover_url ? existing.local_cover : '')
+          const metadataChanged = existing.replay_id !== r.replay_id
+            || existing.room_id !== r.room_id
+            || existing.title !== title
+            || existing.start_time !== r.start_time
+            || existing.end_time !== r.end_time
+            || existing.duration !== duration
+            || existing.cover_url !== coverUrl
+            || existing.local_cover !== localCover
+
+          if (downloadedCover && (downloadedCover !== existing.local_cover || coverNeedsRefresh)) {
+            coversUpdated += 1
+          }
+
+          if (!metadataChanged) {
+            if (!coverNeedsRefresh) alreadyUpToDate += 1
+            continue
+          }
+
           this.db.patchReplay(r.live_key, {
             replay_id: r.replay_id,
-            title: r.live_info?.title || existing.title,
+            room_id: r.room_id,
+            title,
             start_time: r.start_time,
             end_time: r.end_time,
-            duration: r.video_info?.duration || existing.duration,
-            cover_url: r.live_info?.cover || existing.cover_url,
-            local_cover: localCover || existing.local_cover,
+            duration,
+            cover_url: coverUrl,
+            local_cover: localCover,
           })
-          updated++
+          updatedRecords += 1
         }
       }
     })
 
-    return { added, updated, total: rows.length }
+    return {
+      fetched: rows.length,
+      new_records: newRecords,
+      updated_records: updatedRecords,
+      covers_updated: coversUpdated,
+      marked_deleted: markedDeleted,
+      already_up_to_date: alreadyUpToDate,
+    }
   }
 
-  public async downloadCover(liveKey: string, coverUrl: string) {
+  public async downloadCover(liveKey: string, coverUrl: string, force = false, signal?: AbortSignal) {
     if (!coverUrl) return ''
     try {
+      signal?.throwIfAborted()
       const ext = path.extname(new URL(coverUrl).pathname) || '.jpg'
       const filename = `${liveKey}${ext}`
       const fullPath = path.join(this.config.download.output_dir, 'covers', filename)
-      if (!fs.existsSync(fullPath)) {
-        const response = await this.bilibiliClient.fetchWithCookies(coverUrl)
+      if (force || !fs.existsSync(fullPath)) {
+        const response = await this.bilibiliClient.fetchWithCookies(coverUrl, signal ? { signal } : undefined)
         if (!response.ok) return ''
         const buffer = Buffer.from(await response.arrayBuffer())
+        signal?.throwIfAborted()
         await fsp.writeFile(fullPath, buffer)
       }
       return filename
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw error
       return ''
     }
   }
@@ -1072,24 +854,33 @@ export class DesktopBackend {
     if (this.diskStatsPromise) {
       return await this.diskStatsPromise
     }
-    this.diskStatsPromise = (async () => {
-      const target = this.config.download.output_dir || this.baseDir
+    const generation = this.diskStatsGeneration
+    const target = this.config.download.output_dir || this.baseDir
+    const outputDir = this.config.download.output_dir
+    const tempDir = this.config.download.temp_dir
+    const pending = (async () => {
       const stat = await fsp.statfs(target)
-      const usedByService = (await this.getDirSize(this.config.download.output_dir)) + (await this.getDirSize(this.config.download.temp_dir))
+      const usedByService = (await this.getDirSize(outputDir)) + (await this.getDirSize(tempDir))
       const value = {
         path: target,
         total_bytes: stat.bsize * stat.blocks,
         free_bytes: stat.bsize * stat.bfree,
         used_by_service_bytes: usedByService,
       }
-      this.diskStatsCache = {
-        value,
-        expiresAt: Date.now() + 60_000,
+      if (this.diskStatsGeneration === generation) {
+        this.diskStatsCache = {
+          value,
+          expiresAt: Date.now() + 60_000,
+        }
       }
-      this.diskStatsPromise = null
       return value
     })()
-    return await this.diskStatsPromise
+    this.diskStatsPromise = pending
+    try {
+      return await pending
+    } finally {
+      if (this.diskStatsPromise === pending) this.diskStatsPromise = null
+    }
   }
 
   public async getDirSize(target: string): Promise<number> {

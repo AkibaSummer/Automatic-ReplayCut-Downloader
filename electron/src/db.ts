@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import initSqlJs, { type BindParams, type Database as SqlDatabase } from 'sql.js'
-import { ReplayRecord, StreamSlice, ClipTaskRecord } from './types'
+import { ReplayRecord, ReplayPatch, StreamSlice, ClipTaskRecord } from './types'
 import { safeNumber, boolFromDb } from './utils'
 import { resolveAppPathWithBase } from './config'
 import path from 'node:path'
@@ -54,6 +54,7 @@ export class SqliteStore {
   private dirty = false
   private flushTimer: NodeJS.Timeout | null = null
   private isFlushing = false
+  private lastFlushError: unknown = null
 
   private constructor(
     private readonly filePath: string,
@@ -113,14 +114,29 @@ export class SqliteStore {
       clearTimeout(this.flushTimer)
       this.flushTimer = null
     }
+    let attempts = 0
     while (this.dirty || this.isFlushing) {
       if (!this.isFlushing && this.dirty) {
+        if (this.flushTimer) {
+          clearTimeout(this.flushTimer)
+          this.flushTimer = null
+        }
+        attempts += 1
         await this.flushNow()
+        if (this.dirty && attempts >= 3) break
       } else {
         await new Promise(r => setTimeout(r, 50))
       }
     }
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer)
+      this.flushTimer = null
+    }
+    const flushError = this.dirty ? this.lastFlushError : null
     this.db.close()
+    if (flushError) {
+      throw new Error(`Failed to persist database while closing: ${flushError instanceof Error ? flushError.message : String(flushError)}`)
+    }
   }
 
   async withBatch<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -132,6 +148,19 @@ export class SqliteStore {
       if (this.batchDepth === 0 && this.dirty) {
         this.markDirtyOrFlush()
       }
+    }
+  }
+
+  withTransaction<T>(fn: () => T): T {
+    this.db.run('BEGIN IMMEDIATE')
+    try {
+      const result = fn()
+      this.db.run('COMMIT')
+      this.markDirtyOrFlush()
+      return result
+    } catch (error) {
+      this.db.run('ROLLBACK')
+      throw error
     }
   }
 
@@ -157,8 +186,10 @@ export class SqliteStore {
       const tempPath = `${this.filePath}.tmp`
       await fsp.writeFile(tempPath, Buffer.from(data))
       await fsp.rename(tempPath, this.filePath)
+      this.lastFlushError = null
     } catch (err) {
       console.error('Failed to flush database to disk:', err)
+      this.lastFlushError = err
       this.dirty = true // Try again later
     } finally {
       this.isFlushing = false
@@ -228,6 +259,25 @@ export class SqliteStore {
     `)
   }
 
+  healDeletedReplays(baseDir = process.cwd()) {
+    const replays = this.prepare(`SELECT live_key, file_path FROM bilibili_replays WHERE status = 'completed' AND file_path != ''`).all() as {live_key: string, file_path: string}[]
+    let count = 0
+    for (const r of replays) {
+      const resolvedPath = path.isAbsolute(r.file_path) ? r.file_path : path.resolve(baseDir, r.file_path)
+      if (r.file_path && !fs.existsSync(resolvedPath)) {
+        this.prepare(
+          `UPDATE bilibili_replays
+           SET status = 'deleted', file_path = '', file_size = 0, resolution = '', bitrate = '',
+               verify_ok = 0, actual_dur = 0, progress = 0, speed = '', elapsed = '', eta = '',
+               message = 'Local file deleted (auto-healed)', updated_at = ?
+           WHERE live_key = ?`,
+        ).run(new Date().toISOString(), r.live_key)
+        count++
+      }
+    }
+    return count
+  }
+
   cleanupCorruptedReplays() {
     const deleted = this.prepare(
       `DELETE FROM bilibili_replays
@@ -240,11 +290,33 @@ export class SqliteStore {
   }
 
   cleanupStaleClipTasks() {
-    this.prepare(
+    return this.prepare(
       `UPDATE clip_tasks
-       SET status = 'error', message = 'App closed during processing'
+       SET status = 'error', message = 'App closed during processing', updated_at = ?
        WHERE status IN ('pending', 'processing')`
-    ).run()
+    ).run(new Date().toISOString()).changes
+  }
+
+  healMissingClipFiles(baseDir = process.cwd()) {
+    const tasks = this.prepare(
+      `SELECT id, file_path FROM clip_tasks WHERE status = 'done'`,
+    ).all() as Array<{ id: number; file_path: string }>
+    const healedIds: number[] = []
+    for (const task of tasks) {
+      const filePath = String(task.file_path || '')
+      const resolvedPath = filePath
+        ? (path.isAbsolute(filePath) ? filePath : path.resolve(baseDir, filePath))
+        : ''
+      if (resolvedPath && fs.existsSync(resolvedPath)) continue
+      this.prepare(
+        `UPDATE clip_tasks
+         SET status = 'error', progress = 0, file_path = '',
+             message = 'Output file is missing', updated_at = ?
+         WHERE id = ? AND status = 'done'`,
+      ).run(new Date().toISOString(), task.id)
+      healedIds.push(task.id)
+    }
+    return healedIds
   }
 
   getReplays(baseDir: string): ReplayRecord[] {
@@ -379,24 +451,36 @@ export class SqliteStore {
     } satisfies ReplayRecord
   }
 
-  patchReplay(
-    liveKey: string,
-    patch: Partial<
-      Pick<
-        ReplayRecord,
-        'status' | 'message' | 'progress' | 'speed' | 'elapsed' | 'eta' | 'file_path' | 'file_size' | 'resolution' | 'bitrate' | 'verify_ok' | 'actual_duration' | 'replay_id' | 'title' | 'start_time' | 'end_time' | 'duration' | 'cover_url' | 'local_cover'
-      >
-    >,
-  ) {
+  patchReplay(liveKey: string, patch: ReplayPatch) {
+    return this.patchReplayInternal(liveKey, patch)
+  }
+
+  patchReplayIfStatus(liveKey: string, allowedStatuses: readonly string[], patch: ReplayPatch) {
+    if (allowedStatuses.length === 0) return false
+    return this.patchReplayInternal(liveKey, patch, allowedStatuses)
+  }
+
+  private patchReplayInternal(liveKey: string, patch: ReplayPatch, allowedStatuses?: readonly string[]) {
     const currentRow = this.prepare('SELECT * FROM bilibili_replays WHERE live_key = ?').get<Record<string, unknown>>(liveKey)
-    if (!currentRow) return null
+    if (!currentRow) return false
+    const currentStatus = String(currentRow.status || 'not_downloaded')
+    if (allowedStatuses && !allowedStatuses.includes(currentStatus)) return false
     const next = {
       ...currentRow,
       ...patch,
     }
-    this.prepare(
+    const condition = allowedStatuses ? ' AND status = ?' : ''
+    const result = this.prepare(
       `UPDATE bilibili_replays
-       SET file_path = ?,
+       SET replay_id = ?,
+           room_id = ?,
+           title = ?,
+           start_time = ?,
+           end_time = ?,
+           duration = ?,
+           cover_url = ?,
+           local_cover = ?,
+           file_path = ?,
            file_size = ?,
            resolution = ?,
            bitrate = ?,
@@ -409,8 +493,16 @@ export class SqliteStore {
            verify_ok = ?,
            actual_dur = ?,
            updated_at = ?
-       WHERE live_key = ?`,
+       WHERE live_key = ?${condition}`,
     ).run(
+      next.replay_id ?? 0,
+      next.room_id ?? 0,
+      next.title ?? '',
+      next.start_time ?? 0,
+      next.end_time ?? 0,
+      next.duration ?? 0,
+      next.cover_url ?? '',
+      next.local_cover ?? '',
       next.file_path ?? '',
       next.file_size ?? 0,
       next.resolution ?? '',
@@ -422,11 +514,12 @@ export class SqliteStore {
       next.status ?? 'not_downloaded',
       next.message ?? '',
       next.verify_ok ? 1 : 0,
-      (next as any).actual_dur ?? next.actual_duration ?? 0,
+      patch.actual_duration ?? safeNumber(currentRow.actual_dur),
       new Date().toISOString(),
       liveKey,
+      ...(allowedStatuses ? [currentStatus] : []),
     )
-    return true
+    return result.changes > 0
   }
 
   // --- Clip Tasks ---
@@ -492,4 +585,3 @@ export class SqliteStore {
     }))
   }
 }
-

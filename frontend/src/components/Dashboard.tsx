@@ -1,4 +1,4 @@
-import { RefreshCcw, Loader2, Download, MoreHorizontal, Copy, CheckCircle, XCircle, PauseCircle, Play, Pause, FolderOpen, Wrench } from 'lucide-react'
+import { RefreshCcw, Loader2, Download, MoreHorizontal, Copy, CheckCircle, XCircle, PauseCircle, Play, Pause, FolderOpen, Wrench, FileVideo } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store'
 import { useShallow } from 'zustand/react/shallow'
@@ -19,21 +19,19 @@ export function Dashboard({
 
   const {
     showAdvanced, setShowAdvanced,
-    exportUseProxy, setExportUseProxy,
     isRefreshing, isScanning, isSyncingAll,
     backendOnline, paused,
     replays, progressMap, runtimeState,
     buildApiUrl, apiClient, showToast, replaceToast,
-    setSelectedLiveKey
+    setSelectedLiveKey, patchReplay
   } = useAppStore(useShallow(state => ({
 
     showAdvanced: state.showAdvanced, setShowAdvanced: state.setShowAdvanced,
-    exportUseProxy: state.exportUseProxy, setExportUseProxy: state.setExportUseProxy,
     isRefreshing: state.isRefreshing, isScanning: state.isScanning, isSyncingAll: state.isSyncingAll,
     backendOnline: state.backendOnline, paused: state.paused,
     replays: state.replays, progressMap: state.progressMap, runtimeState: state.runtimeState,
     buildApiUrl: state.buildApiUrl, apiClient: state.apiClient, showToast: state.showToast, replaceToast: state.replaceToast,
-    setSelectedLiveKey: state.setSelectedLiveKey
+    setSelectedLiveKey: state.setSelectedLiveKey, patchReplay: state.patchReplay
   
 })))
 
@@ -73,7 +71,7 @@ export function Dashboard({
 
   const handleCopyExport = async () => {
     try {
-      const res = await apiClient.get(`/api/export-tsv?proxy=${exportUseProxy}`)
+      const res = await apiClient.get('/api/export-tsv')
       await navigator.clipboard.writeText(res.data)
       showToast({ tone: 'success', title: t('messages.copyExportOk') })
     } catch (e) {
@@ -89,14 +87,20 @@ export function Dashboard({
       return res
     } catch (e) {
       replaceToast(toastId, { tone: 'error', title: opts.errorTitle, message: getErrorMessage(e) })
-      throw e
+      return undefined
     }
   }
 
   const handleDownload = async (liveKey: string) => {
     await toastAction({
       loadingTitle: t('messages.starting'), loadingMessage: t('messages.creatingTask'), successTitle: t('messages.started'), successMessage: t('messages.watchProgress'), errorTitle: t('messages.startFailed'),
-      action: () => apiClient.post(`/api/replays/${liveKey}/download`),
+      action: async () => {
+        const res = await apiClient.post(`/api/replays/${encodeURIComponent(liveKey)}/download`)
+        if (res.data?.ok === false) throw new Error(t('messages.operationRejected'))
+        patchReplay(liveKey, { status: 'pending', message: t('messages.queued'), progress: 0, speed: '', eta: '' })
+        void fetchReplays({ notify: false })
+        return res
+      },
     })
   }
 
@@ -104,8 +108,10 @@ export function Dashboard({
     await toastAction({
       loadingTitle: t('messages.pausing'), successTitle: t('messages.paused'), errorTitle: t('messages.pauseFailed'),
       action: async () => {
-        const res = await apiClient.post(`/api/replays/${liveKey}/pause`)
-        await fetchReplays({ notify: false })
+        const res = await apiClient.post(`/api/replays/${encodeURIComponent(liveKey)}/pause`)
+        if (res.data?.ok === false) throw new Error(t('messages.operationRejected'))
+        patchReplay(liveKey, { status: 'paused', message: t('common.paused'), speed: '', eta: '' })
+        void fetchReplays({ notify: false })
         return res
       },
     })
@@ -115,8 +121,10 @@ export function Dashboard({
     await toastAction({
       loadingTitle: t('messages.resuming'), successTitle: t('messages.resumed'), errorTitle: t('messages.resumeFailed'),
       action: async () => {
-        const res = await apiClient.post(`/api/replays/${liveKey}/resume`)
-        await fetchReplays({ notify: false })
+        const res = await apiClient.post(`/api/replays/${encodeURIComponent(liveKey)}/resume`)
+        if (res.data?.ok === false) throw new Error(t('messages.operationRejected'))
+        patchReplay(liveKey, { status: 'pending', message: t('messages.resumed'), speed: '', eta: '' })
+        void fetchReplays({ notify: false })
         return res
       },
     })
@@ -178,20 +186,7 @@ export function Dashboard({
             {showAdvanced && (
               <div className="absolute right-0 mt-2 w-56 bg-white border border-slate-200 rounded-xl shadow-xl z-[150] overflow-hidden py-1">
                 <button
-                  type="button"
-                  role="switch"
-                  aria-checked={exportUseProxy}
-                  onClick={() => setExportUseProxy(!exportUseProxy)}
-                  className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
-                >
-                  <span>{t('common.exportUseProxy', '本地代理流')}</span>
-                  <div className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${exportUseProxy ? 'bg-[var(--color-bili-blue)]' : 'bg-slate-300'}`}>
-                    <span className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform ${exportUseProxy ? 'translate-x-3.5' : 'translate-x-0.5'}`} />
-                  </div>
-                </button>
-                <div className="h-px bg-slate-100 my-1 mx-2" />
-                <button
-                  onClick={() => { window.open(buildApiUrl(`/api/export-tsv?proxy=${exportUseProxy}`), '_blank'); setShowAdvanced(false); }}
+                  onClick={() => { window.open(buildApiUrl('/api/export-tsv'), '_blank'); setShowAdvanced(false); }}
                   className="w-full flex items-center px-4 py-2.5 text-sm text-slate-700 hover:bg-slate-50 transition"
                 >
                   <Download className="w-4 h-4 mr-3 text-slate-400" />
@@ -377,24 +372,22 @@ export function Dashboard({
                       </button>
                     )}
                     {r.file_path && displayStatus === 'completed' && (
-                      <>
+                      <div className="flex gap-2">
                         <button
-                          onClick={() => apiClient.post('/api/clip/open-file', { filePath: r.file_path })}
-                          className="p-2.5 text-slate-500 hover:text-[var(--color-bili-blue)] rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5"
+                          onClick={() => { void apiClient.post('/api/clip/open-file', { filePath: r.file_path }).catch(error => showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(error) })) }}
+                          className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-[var(--color-bili-blue)] bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
                         >
-                          <Tooltip content={t('clipTask.openFile')}>
-                            <Play className="w-4 h-4" />
-                          </Tooltip>
+                          <FileVideo className="w-4 h-4" />
+                          {t('clipTask.openFile')}
                         </button>
                         <button
-                          onClick={() => apiClient.post('/api/clip/open-folder', { filePath: r.file_path })}
-                          className="p-2.5 text-slate-500 hover:text-amber-600 rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5"
+                          onClick={() => { void apiClient.post('/api/clip/open-folder', { filePath: r.file_path }).catch(error => showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(error) })) }}
+                          className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
                         >
-                          <Tooltip content={t('clipTask.openFolder')}>
-                            <FolderOpen className="w-4 h-4" />
-                          </Tooltip>
+                          <FolderOpen className="w-4 h-4" />
+                          {t('clipTask.openFolder')}
                         </button>
-                      </>
+                      </div>
                     )}
                     <button
                       onClick={() => setSelectedLiveKey(r.live_key)}

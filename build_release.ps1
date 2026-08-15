@@ -1,71 +1,106 @@
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
 
-$RELEASE_DIR = "release"
-$PORTABLE_DIR = Join-Path $RELEASE_DIR "portable"
-$PORTABLE_EXE = "ReplayManager-Portable.exe"
-$ZIP_NAME = "ReplayManager-Windows-Portable.zip"
+$RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location -LiteralPath $RepoRoot
 
-Write-Host "1. Cleaning previous release..." -ForegroundColor Cyan
-If (Test-Path $RELEASE_DIR) {
-    Remove-Item -Recurse -Force $RELEASE_DIR
-}
-New-Item -ItemType Directory -Path $RELEASE_DIR | Out-Null
-New-Item -ItemType Directory -Path $PORTABLE_DIR | Out-Null
+$Package = Get-Content -LiteralPath (Join-Path $RepoRoot 'package.json') -Raw | ConvertFrom-Json
+$Version = [string]$Package.version
+$ProductName = [string]$Package.build.productName
+$ReleaseRoot = [IO.Path]::GetFullPath((Join-Path $RepoRoot 'release'))
+$ElectronOutput = [IO.Path]::GetFullPath((Join-Path $ReleaseRoot 'electron\win-unpacked'))
+$BundleName = "ReplayManager-v$Version-windows-x64"
+$StagingDir = [IO.Path]::GetFullPath((Join-Path $ReleaseRoot $BundleName))
+$ZipPath = [IO.Path]::GetFullPath((Join-Path $ReleaseRoot "$BundleName.zip"))
+$ZipTempPath = [IO.Path]::GetFullPath((Join-Path $ReleaseRoot "$BundleName.tmp.zip"))
 
-Write-Host "2. Installing dependencies..." -ForegroundColor Cyan
-if (-not (Test-Path "node_modules")) {
-    npm install
-    if ($LASTEXITCODE -ne 0) {
-        throw "Root npm install failed with exit code $LASTEXITCODE"
-    }
-} else {
-    Write-Host "Using existing root node_modules..." -ForegroundColor Green
-}
-if (-not (Test-Path "frontend\node_modules")) {
-    npm --prefix frontend install
-    if ($LASTEXITCODE -ne 0) {
-        throw "Frontend npm install failed with exit code $LASTEXITCODE"
-    }
-} else {
-    Write-Host "Using existing frontend node_modules..." -ForegroundColor Green
-}
-
-Write-Host "3. Building Electron desktop application..." -ForegroundColor Cyan
-npm run dist
-if ($LASTEXITCODE -ne 0) {
-    throw "Electron build failed with exit code $LASTEXITCODE"
-}
-
-$DIST_OUTPUT = Join-Path "release\electron" $PORTABLE_EXE
-if (-not (Test-Path $DIST_OUTPUT)) {
-    throw "Portable executable not found: $DIST_OUTPUT"
-}
-Copy-Item -Path $DIST_OUTPUT -Destination (Join-Path $PORTABLE_DIR $PORTABLE_EXE) -Force
-Write-Host "Electron portable executable built successfully!" -ForegroundColor Green
-
-Write-Host "4. Copying existing portable data..." -ForegroundColor Cyan
-$PORTABLE_FILES = @(
-    "config.yaml",
-    "replays.db",
-    "cookies.json"
-)
-foreach ($file in $PORTABLE_FILES) {
-    if (Test-Path $file) {
-        Copy-Item -Path $file -Destination (Join-Path $PORTABLE_DIR $file) -Force
+function Assert-ReleaseChild([string]$Candidate) {
+    $Prefix = $ReleaseRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+    if (-not $Candidate.StartsWith($Prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify a path outside the release directory: $Candidate"
     }
 }
-if (Test-Path "runtime") {
-    Copy-Item -Path "runtime" -Destination $PORTABLE_DIR -Recurse -Force
+
+Assert-ReleaseChild $ElectronOutput
+Assert-ReleaseChild $StagingDir
+Assert-ReleaseChild $ZipPath
+Assert-ReleaseChild $ZipTempPath
+New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
+if (Test-Path -LiteralPath $StagingDir) {
+    Remove-Item -LiteralPath $StagingDir -Recurse -Force
+}
+foreach ($OldArchive in @($ZipPath, $ZipTempPath)) {
+    if (Test-Path -LiteralPath $OldArchive) {
+        Remove-Item -LiteralPath $OldArchive -Force
+    }
 }
 
-Write-Host "5. Zipping final release..." -ForegroundColor Cyan
-$ZIP_PATH = Join-Path $RELEASE_DIR $ZIP_NAME
-If (Test-Path $ZIP_PATH) {
-    Remove-Item -Force $ZIP_PATH
-}
-Compress-Archive -Path "$PORTABLE_DIR\*" -DestinationPath $ZIP_PATH
+Write-Host '1. Installing locked dependencies...' -ForegroundColor Cyan
+npm ci
+if ($LASTEXITCODE -ne 0) { throw "Root npm ci failed with exit code $LASTEXITCODE" }
+npm --prefix frontend ci
+if ($LASTEXITCODE -ne 0) { throw "Frontend npm ci failed with exit code $LASTEXITCODE" }
 
-Write-Host "===============================================" -ForegroundColor Green
-Write-Host "✅ Build completed successfully! " -ForegroundColor Green
-Write-Host "📁 The portable bundle is located at: $ZIP_PATH" -ForegroundColor Yellow
-Write-Host "===============================================" -ForegroundColor Green
+Write-Host '2. Running release verification...' -ForegroundColor Cyan
+npm run verify
+if ($LASTEXITCODE -ne 0) { throw "Release verification failed with exit code $LASTEXITCODE" }
+
+Write-Host '3. Building the unpacked Electron application...' -ForegroundColor Cyan
+npx electron-builder --win dir --x64
+if ($LASTEXITCODE -ne 0) { throw "Electron build failed with exit code $LASTEXITCODE" }
+if (-not (Test-Path -LiteralPath $ElectronOutput -PathType Container)) {
+    throw "Electron output was not found: $ElectronOutput"
+}
+if (-not (Test-Path -LiteralPath (Join-Path $ElectronOutput 'resources\app.asar') -PathType Leaf)) {
+    throw 'Packaged app.asar was not found in the Electron output'
+}
+$AppExe = Join-Path $ElectronOutput "$ProductName.exe"
+if (-not (Test-Path -LiteralPath $AppExe -PathType Leaf)) {
+    throw "Packaged application executable was not found: $AppExe"
+}
+
+Write-Host '4. Creating a clean portable bundle...' -ForegroundColor Cyan
+Copy-Item -LiteralPath $ElectronOutput -Destination $StagingDir -Recurse
+
+# Runtime state is intentionally never shipped. A fresh app creates defaults next
+# to the executable; existing users keep their own config/database/cookies.
+$ForbiddenNames = @('config.yaml', 'config.yaml.bak', 'replays.db', 'replays.db-wal', 'replays.db-shm', 'cookies.json')
+$LeakedFiles = Get-ChildItem -LiteralPath $StagingDir -Recurse -File |
+    Where-Object {
+        $ForbiddenNames -contains $_.Name -or
+        $_.Name -like '.env*' -or
+        $_.Name -like '*.log' -or
+        $_.Name -like '*.old' -or
+        $_.Name -like '*.tmp'
+    }
+if ($LeakedFiles) {
+    $Names = ($LeakedFiles | ForEach-Object FullName) -join ', '
+    throw "Portable bundle unexpectedly contains private runtime data: $Names"
+}
+
+$AsarPath = Join-Path $StagingDir 'resources\app.asar'
+$AsarCheck = @'
+const asar = require('@electron/asar');
+const archive = process.argv[1];
+const expectedVersion = process.argv[2];
+const entries = asar.listPackage(archive);
+const forbidden = /(^|[\\/])(config\.yaml(?:\.bak)?|cookies\.json|replays\.db(?:-wal|-shm)?|\.env[^\\/]*|[^\\/]+\.(?:log|old|tmp))$/i;
+const leaks = entries.filter(entry => forbidden.test(entry));
+if (leaks.length) throw new Error(`private runtime entries in app.asar: ${leaks.join(', ')}`);
+const pkg = JSON.parse(asar.extractFile(archive, 'package.json').toString('utf8'));
+if (pkg.version !== expectedVersion) throw new Error(`app.asar version ${pkg.version} != ${expectedVersion}`);
+'@
+& node -e $AsarCheck $AsarPath $Version
+if ($LASTEXITCODE -ne 0) { throw 'app.asar validation failed' }
+
+$ExeVersion = (Get-Item -LiteralPath (Join-Path $StagingDir "$ProductName.exe")).VersionInfo.ProductVersion
+if ($ExeVersion -and -not $ExeVersion.StartsWith($Version, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Executable version $ExeVersion does not match package version $Version"
+}
+Compress-Archive -Path (Join-Path $StagingDir '*') -DestinationPath $ZipTempPath -CompressionLevel Optimal
+Move-Item -LiteralPath $ZipTempPath -Destination $ZipPath
+$Hash = (Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+Write-Host 'Build completed successfully.' -ForegroundColor Green
+Write-Host "Portable directory: $StagingDir" -ForegroundColor Yellow
+Write-Host "Portable archive:   $ZipPath" -ForegroundColor Yellow
+Write-Host "SHA256:              $Hash" -ForegroundColor Yellow

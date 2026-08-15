@@ -131,6 +131,9 @@ export function SettingsPage({
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">{t('settings.maxTasks')}</label>
               <input
+                type="number"
+                min={1}
+                step={1}
                 value={config.download.max_concurrent_tasks || 1}
                 onChange={e => setConfig({ ...config, download: { ...config.download, max_concurrent_tasks: parseInt(e.target.value || '1') } })}
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-bili-pink)] focus:border-transparent outline-none transition"
@@ -140,6 +143,9 @@ export function SettingsPage({
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">{t('settings.segConc')}</label>
               <input
+                type="number"
+                min={1}
+                step={1}
                 value={config.download.concurrent_segments || 1}
                 onChange={e => setConfig({ ...config, download: { ...config.download, concurrent_segments: parseInt(e.target.value || '1') } })}
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-[var(--color-bili-pink)] focus:border-transparent outline-none transition"

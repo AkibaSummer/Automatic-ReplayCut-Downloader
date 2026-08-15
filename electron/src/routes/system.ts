@@ -1,9 +1,6 @@
-import path from 'node:path'
 import type { DesktopBackend } from '../backend'
 import type { Request, Response } from 'express'
-import { deepMerge, normalizeConfigWithBase, saveConfigFile } from '../config'
 import { AppConfig } from '../types'
-import { ensureDir } from '../utils'
 
 export function registerSystemRoutes(backend: DesktopBackend) {
   backend.app.get('/api/health', (_req: Request, res: Response) => {
@@ -19,42 +16,54 @@ export function registerSystemRoutes(backend: DesktopBackend) {
   })
 
   backend.app.post('/api/config', async (req: Request, res: Response) => {
+    let mutation: ReturnType<DesktopBackend['beginMutation']> | undefined
     try {
-      const previous = backend.config
+      mutation = backend.beginMutation()
       const incoming = req.body as Partial<AppConfig>
-      const next = deepMerge(backend.config, incoming)
-      next.server = previous.server
-      next.database = previous.database
-      const normalized = normalizeConfigWithBase(backend.baseDir, next)
-      for (const key of Object.keys(backend.config)) delete (backend.config as any)[key]
-      Object.assign(backend.config, normalized)
-      ensureDir(backend.config.download.output_dir)
-      ensureDir(backend.config.download.temp_dir)
-      ensureDir(path.join(backend.config.download.output_dir, 'covers'))
-      await saveConfigFile(backend.baseDir, backend.configPath, backend.config)
+      const canonical = await backend.updateConfig(draft => {
+        // This endpoint backs SettingsPage, so only accept fields that page can
+        // actually edit. Credentials and internal paths have dedicated routes;
+        // accepting a stale full-store snapshot here could roll them back.
+        if (incoming.bilibili?.anchor_id !== undefined) {
+          draft.bilibili.anchor_id = Number(incoming.bilibili.anchor_id) || 0
+        }
+        if (incoming.download?.output_dir !== undefined) {
+          draft.download.output_dir = String(incoming.download.output_dir)
+        }
+        if (incoming.download?.clip_output_dir !== undefined) {
+          draft.download.clip_output_dir = String(incoming.download.clip_output_dir)
+        }
+        if (incoming.download?.filename_template !== undefined) {
+          draft.download.filename_template = String(incoming.download.filename_template)
+        }
+        if (incoming.download?.max_concurrent_tasks !== undefined) {
+          draft.download.max_concurrent_tasks = Number(incoming.download.max_concurrent_tasks)
+        }
+        if (incoming.download?.concurrent_segments !== undefined) {
+          draft.download.concurrent_segments = Number(incoming.download.concurrent_segments)
+        }
+      })
       res.setHeader('x-migrated-files', '0')
       res.setHeader('x-renamed-files', '0')
-      res.json(backend.config)
+      res.json(canonical)
     } catch (error) {
       backend.sendError(res, error)
+    } finally {
+      mutation?.finish()
     }
   })
 
-  backend.app.post('/api/cleanup-stale', (_req: Request, res: Response) => {
-    const result = backend.db
-      .prepare(
-        `UPDATE bilibili_replays
-         SET status = 'paused',
-             message = 'Reset by cleanup-stale',
-             progress = 0,
-             speed = '',
-             elapsed = '',
-             eta = '',
-             updated_at = ?
-         WHERE status IN ('pending', 'downloading', 'merging')`,
-      )
-      .run(new Date().toISOString())
-    res.json({ count: result.changes })
+  backend.app.post('/api/cleanup-stale', async (_req: Request, res: Response) => {
+    let mutation: ReturnType<DesktopBackend['beginMutation']> | undefined
+    try {
+      mutation = backend.beginMutation()
+      const count = await backend.cleanupStaleReplayTasks()
+      res.json({ count })
+    } catch (error) {
+      backend.sendError(res, error)
+    } finally {
+      mutation?.finish()
+    }
   })
 
   backend.app.post('/api/cleanup-streams', (_req: Request, res: Response) => {

@@ -14,8 +14,10 @@ import {
   Scissors,
   Upload,
 } from 'lucide-react'
-import type { ClipPageProps, FeishuRecord, FeishuPageResult } from './types'
+import type { ClipPageProps, ClipTaskRecord, FeishuRecord, FeishuPageResult } from './types'
 import { getErrorMessage } from './utils'
+import { useAppStore } from './store'
+import { WaveformRequestRegistry } from './utils/waveformRequests'
 
 /** Parse time strings like "1:14:06", "30:00", "90" into seconds */
 function parseTimeInput(input: string): number | null {
@@ -49,7 +51,9 @@ function formatTimeInput(seconds: number): string {
 }
 
 export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPageProps) {
+  const configuredClipOutputDir = useAppStore(state => state.config?.download.clip_output_dir)
   const [url, setUrl] = useState('')
+  const [loadedUrl, setLoadedUrl] = useState('')
   const [videoInfo, setVideoInfo] = useState<{ title: string; duration: number; author: string; cover: string; audioProxyPath: string; qualities?: { audio: { id: number; bandwidth: number; codecs: string; baseUrl?: string }[]; video: { id: number; bandwidth: number; codecs: string; width: number; height: number; frameRate: string; baseUrl?: string }[] } } | null>(null)
   const [startTime, setStartTime] = useState(0)
   const [endTime, setEndTime] = useState(30)
@@ -68,6 +72,11 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   const [clipPrefixCut, setClipPrefixCut] = useState(true)
   const [clipSuffixTime, setClipSuffixTime] = useState(true)
   const [clipMode, setClipMode] = useState<'copy' | 'reencode' | 'smart'>('smart')
+  const clipOutputRevisionRef = useRef(0)
+  const waveformRequestsRef = useRef(new WaveformRequestRegistry())
+  const infoRequestRef = useRef<AbortController | null>(null)
+  const previewRequestRef = useRef<AbortController | null>(null)
+  const previewSequenceRef = useRef(0)
 
   // --- Feishu song list state ---
   const [feishuOpen, setFeishuOpen] = useState(false)
@@ -91,10 +100,29 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   const [feishuSetupSaving, setFeishuSetupSaving] = useState(false)
   const [feishuSetupStep, setFeishuSetupStep] = useState(1)
 
+  const applyClipOutputDir = useCallback((path: string) => {
+    setClipOutputDir(path)
+    const { config, setConfig } = useAppStore.getState()
+    if (config && config.download.clip_output_dir !== path) {
+      setConfig({ ...config, download: { ...config.download, clip_output_dir: path } })
+    }
+  }, [])
+
+  // The global config is canonical. Selecting only this scalar means unrelated
+  // settings edits do not disturb a path the user is currently typing here.
+  useEffect(() => {
+    if (configuredClipOutputDir !== undefined) {
+      clipOutputRevisionRef.current += 1
+      setClipOutputDir(configuredClipOutputDir)
+    }
+  }, [configuredClipOutputDir])
+
   // Check feishu status on mount
   useEffect(() => {
     apiClient.get('/api/feishu/status').then(res => {
-      setFeishuStatus(res.data)
+      if (res.data.config) useAppStore.getState().setConfig(res.data.config)
+      const { config: _canonicalConfig, ...status } = res.data
+      setFeishuStatus(status)
     }).catch(() => {
       setFeishuStatus({ ok: false, stage: 'not_configured', message: '无法连接后端' })
     })
@@ -102,8 +130,13 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
 
   // Fetch clip output directory on mount
   useEffect(() => {
+    const revision = clipOutputRevisionRef.current
     apiClient.get('/api/clip/output-dir').then(res => {
-      setClipOutputDir(res.data.path || '')
+      // AppController also loads /api/config. Do not let a slower mount request
+      // overwrite a path already edited in Settings while ClipPage is hidden.
+      if (!useAppStore.getState().config && clipOutputRevisionRef.current === revision) {
+        setClipOutputDir(res.data.path || '')
+      }
     }).catch(() => {})
   }, [apiClient])
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -142,33 +175,62 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     return `${bps} bps`
   }
 
-  const fetchInfo = async () => {
-    setClipLoading(true)
-    setClipError('')
+  const beginVideoSession = useCallback(() => {
+    infoRequestRef.current?.abort()
+    infoRequestRef.current = null
+    previewRequestRef.current?.abort()
+    previewRequestRef.current = null
+    previewSequenceRef.current += 1
+    try { sourceRef.current?.stop() } catch {}
+    sourceRef.current = null
+    const generation = waveformRequestsRef.current.beginSession()
     setVideoInfo(null)
+    setLoadedUrl('')
     setChunkPeaks({})
     setChunkStatus({})
-
+    setPlaying(false)
     setAudioQualityIndex(0)
+    setVideoQualityIndex(0)
+    setActiveFeishuRecord(null)
+    return generation
+  }, [])
+
+  useEffect(() => () => {
+    infoRequestRef.current?.abort()
+    previewRequestRef.current?.abort()
+    previewSequenceRef.current += 1
+    waveformRequestsRef.current.beginSession()
+  }, [])
+
+  const fetchInfo = async () => {
+    const targetUrl = url.trim()
+    const generation = beginVideoSession()
+    const controller = new AbortController()
+    infoRequestRef.current = controller
+    setClipLoading(true)
+    setClipError('')
+
     try {
-      const res = await apiClient.post('/api/clip/info', { url })
+      const res = await apiClient.post('/api/clip/info', { url: targetUrl }, { signal: controller.signal })
+      if (!waveformRequestsRef.current.isGenerationCurrent(generation) || controller.signal.aborted) return
       const info = res.data as { title: string; duration: number; author: string; cover: string; audioProxyPath: string; qualities?: { audio: { id: number; bandwidth: number; codecs: string; baseUrl?: string }[]; video: { id: number; bandwidth: number; codecs: string; width: number; height: number; frameRate: string; baseUrl?: string }[] } }
       setVideoInfo(info)
+      setLoadedUrl(targetUrl)
       setStartTime(0)
       setEndTime(info.duration)
       setScrollOffset(info.duration / 2)
       setZoomWindow(info.duration + 40)
     } catch (e) {
+      if (!waveformRequestsRef.current.isGenerationCurrent(generation) || controller.signal.aborted) return
       setClipError(getErrorMessage(e))
+    } finally {
+      if (infoRequestRef.current === controller) infoRequestRef.current = null
+      if (waveformRequestsRef.current.isGenerationCurrent(generation)) setClipLoading(false)
     }
-    setClipLoading(false)
   }
 
   const CHUNK_DURATION = 60
   const PEAKS_PER_SEC = 30
-
-  // Track in-flight requests so we can cancel low-priority ones
-  const inflightRef = useRef<Map<number, AbortController>>(new Map())
 
   // Progressive Chunk Loader Effect with cancellation
   useEffect(() => {
@@ -191,12 +253,11 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     }
 
     // Cancel in-flight requests that are now far from the viewport
-    const inflight = inflightRef.current
-    for (const [chunkIdx, controller] of inflight.entries()) {
+    const requests = waveformRequestsRef.current
+    for (const [chunkIdx, token] of requests.entries()) {
       const priority = chunkPriority(chunkIdx)
       if (priority > 360) { // > 6 minutes away from any focus point
-        controller.abort()
-        inflight.delete(chunkIdx)
+        requests.abort(token)
         setChunkStatus(prev => {
           const next = { ...prev }
           delete next[chunkIdx] // Reset so it can be re-queued later
@@ -212,7 +273,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     const visEndChunk = Math.min(totalChunks - 1, Math.floor(viewEnd / CHUNK_DURATION) + BUFFER_CHUNKS)
     const loadable: number[] = []
     for (let i = visStartChunk; i <= visEndChunk; i++) {
-      if (!chunkStatus[i] && !inflight.has(i)) loadable.push(i)
+      if (!chunkStatus[i] && !requests.has(i)) loadable.push(i)
     }
     if (loadable.length === 0) return
 
@@ -220,15 +281,15 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     loadable.sort((a, b) => chunkPriority(a) - chunkPriority(b))
 
     // How many slots are free? (max 3 concurrent)
-    const freeSlots = Math.max(0, 3 - inflight.size)
+    const freeSlots = Math.max(0, 3 - requests.size)
     if (freeSlots === 0) return
 
     const toLoad = loadable.slice(0, freeSlots)
     if (toLoad.length === 0) return
 
     toLoad.forEach(chunkIdx => {
-      const controller = new AbortController()
-      inflight.set(chunkIdx, controller)
+      const token = requests.create(chunkIdx)
+      if (!token) return
       setChunkStatus(prev => ({ ...prev, [chunkIdx]: 'loading' }))
       
       const fetchStart = chunkIdx * CHUNK_DURATION
@@ -241,11 +302,12 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       })
       
       const audioUrl = `/api/clip/audio-proxy?${queryParams.toString()}`
-      apiClient.get(audioUrl, { responseType: 'arraybuffer', signal: controller.signal }).then(async resp => {
-         inflight.delete(chunkIdx)
+      apiClient.get(audioUrl, { responseType: 'arraybuffer', signal: token.controller.signal }).then(async resp => {
+         if (!requests.isCurrent(token)) return
          const ctx = audioCtxRef.current!
          if (ctx.state === 'suspended') await ctx.resume()
          const buffer = await ctx.decodeAudioData(resp.data as ArrayBuffer)
+         if (!requests.isCurrent(token)) return
          const data = buffer.getChannelData(0)
          const sampleRate = buffer.sampleRate
          const expectedPeaks = Math.ceil(fetchDuration * PEAKS_PER_SEC)
@@ -263,10 +325,13 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
          }
          setChunkPeaks(prev => ({ ...prev, [chunkIdx]: peaks }))
          setChunkStatus(prev => ({ ...prev, [chunkIdx]: 'loaded' }))
-      }).catch(err => {
-         inflight.delete(chunkIdx)
-         if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return // Intentional cancel
-         console.error('Failed to load chunk', chunkIdx, err)
+         requests.finish(token)
+       }).catch(err => {
+          const belongsToCurrentVideo = requests.isGenerationCurrent(token.generation) && requests.owns(token)
+          requests.finish(token)
+          if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return // Intentional cancel
+          if (!belongsToCurrentVideo) return
+          console.error('Failed to load chunk', chunkIdx, err)
          setChunkStatus(prev => ({ ...prev, [chunkIdx]: 'error' }))
       })
     })
@@ -444,7 +509,10 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     if (sourceRef.current) {
       try { sourceRef.current.stop() } catch {}
     }
-    
+    previewRequestRef.current?.abort()
+    const controller = new AbortController()
+    const sequence = ++previewSequenceRef.current
+    previewRequestRef.current = controller
     setPlaying(true)
     try {
        const lowestQualityAudio = videoInfo.qualities!.audio[videoInfo.qualities!.audio.length - 1]
@@ -454,22 +522,31 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
          duration: (endTime - startTime).toString()
        })
        const audioUrl = `/api/clip/audio-proxy?${queryParams.toString()}`
-       const resp = await apiClient.get(audioUrl, { responseType: 'arraybuffer' })
+       const resp = await apiClient.get(audioUrl, { responseType: 'arraybuffer', signal: controller.signal })
        const buffer = await ctx.decodeAudioData(resp.data as ArrayBuffer)
+       if (controller.signal.aborted || previewSequenceRef.current !== sequence) return
        const source = ctx.createBufferSource()
        source.buffer = buffer
        source.connect(ctx.destination)
        source.start(0)
-       source.onended = () => setPlaying(false)
+       source.onended = () => {
+         if (previewSequenceRef.current === sequence) setPlaying(false)
+       }
        sourceRef.current = source
     } catch (e) {
+       if (controller.signal.aborted || previewSequenceRef.current !== sequence) return
        console.error(e)
        setPlaying(false)
        showToast({ tone: 'error', title: 'Preview failed', message: getErrorMessage(e) })
+    } finally {
+       if (previewRequestRef.current === controller) previewRequestRef.current = null
     }
   }
 
   const stopPreview = () => {
+    previewRequestRef.current?.abort()
+    previewRequestRef.current = null
+    previewSequenceRef.current += 1
     if (sourceRef.current) {
       try { sourceRef.current.stop() } catch {}
       sourceRef.current = null
@@ -478,23 +555,32 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   }
 
   const executeClip = async () => {
-    if (!videoInfo) return
+    if (!videoInfo || !loadedUrl || loadedUrl !== url.trim()) return
+    const selectedAudioQuality = videoInfo.qualities?.audio?.[audioQualityIndex]
+    const selectedVideoQuality = videoInfo.qualities?.video?.[videoQualityIndex]
     setClipLoading(true)
     setClipError('')
     try {
       const res = await apiClient.post('/api/clip/execute', { 
-        url, 
+        url: loadedUrl,
         title: clipTitle || videoInfo.title,
         startTime, 
         endTime, 
         audioQualityIndex,
         videoQualityIndex,
+        audioQualityId: selectedAudioQuality?.id,
+        audioQualityCodec: selectedAudioQuality?.codecs,
+        videoQualityId: selectedVideoQuality?.id,
+        videoQualityCodec: selectedVideoQuality?.codecs,
         prefixCut: clipPrefixCut,
         suffixTime: clipSuffixTime,
         clipMode,
       })
       showToast({ tone: 'success', title: 'Added to Task Queue', message: `Task ID: ${res.data.taskId}` })
       setShowClipDialog(false)
+      void apiClient.get<ClipTaskRecord[]>('/api/clip/tasks', { params: { _t: Date.now() } })
+        .then(tasks => useAppStore.getState().mergeClipTasks(tasks.data))
+        .catch(() => {})
     } catch (e) {
       setClipError(getErrorMessage(e))
       showToast({ tone: 'error', title: 'Failed to add task', message: getErrorMessage(e) })
@@ -510,8 +596,10 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
         app_id: feishuSetupAppId.trim(),
         app_secret: feishuSetupSecret.trim(),
       })
-      setFeishuStatus(res.data)
-      if (res.data.ok) {
+      if (res.data.config) useAppStore.getState().setConfig(res.data.config)
+      const { config: _canonicalConfig, ...status } = res.data
+      setFeishuStatus(status)
+      if (status.ok) {
         showToast({ tone: 'success', title: t('feishu.setupSuccess'), message: '' })
         fetchFeishuRecords(true)
       }
@@ -557,6 +645,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       return
     }
     const normalizedUrl = rec.replay_url.replace(/^http:\/\//, 'https://')
+    const generation = beginVideoSession()
     setUrl(normalizedUrl)
     setClipTitle(rec.song_name)
     setActiveFeishuRecord(rec)
@@ -564,17 +653,15 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     const parsedEnd = parseTimeInput(rec.end_time)
     if (parsedStart !== null) setStartTime(parsedStart)
     if (parsedEnd !== null) setEndTime(parsedEnd)
-    // Auto-trigger fetch info after URL is set
-    setTimeout(() => {
-      setClipLoading(true)
-      setClipError('')
-      setVideoInfo(null)
-      setChunkPeaks({})
-      setChunkStatus({})
-      setAudioQualityIndex(0)
-      apiClient.post('/api/clip/info', { url: normalizedUrl }).then(res => {
+    const controller = new AbortController()
+    infoRequestRef.current = controller
+    setClipLoading(true)
+    setClipError('')
+    apiClient.post('/api/clip/info', { url: normalizedUrl }, { signal: controller.signal }).then(res => {
+        if (!waveformRequestsRef.current.isGenerationCurrent(generation) || controller.signal.aborted) return
         const info = res.data as any
         setVideoInfo(info)
+        setLoadedUrl(normalizedUrl)
         // Keep the feishu times instead of resetting
         const s = parsedStart ?? 0
         const e2 = parsedEnd ?? info.duration
@@ -585,12 +672,13 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
         const zoomW = rangeLen + 40 // 20s padding each side
         setZoomWindow(Math.min(zoomW, info.duration + 40))
         setScrollOffset(s + rangeLen / 2)
-      }).catch(e => {
-        setClipError(getErrorMessage(e))
-      }).finally(() => {
-        setClipLoading(false)
-      })
-    }, 50)
+    }).catch(e => {
+      if (!waveformRequestsRef.current.isGenerationCurrent(generation) || controller.signal.aborted) return
+      setClipError(getErrorMessage(e))
+    }).finally(() => {
+      if (infoRequestRef.current === controller) infoRequestRef.current = null
+      if (waveformRequestsRef.current.isGenerationCurrent(generation)) setClipLoading(false)
+    })
   }
 
   const handleFeishuWriteback = async (rec: FeishuRecord) => {
@@ -624,7 +712,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   }, [feishuHasMore, feishuLoadingMore, feishuNextPageToken])
 
   const openClipDialog = () => {
-    if (!videoInfo) return
+    if (!videoInfo || loadedUrl !== url.trim()) return
     if (activeFeishuRecord) {
       const date = activeFeishuRecord.date ? activeFeishuRecord.date.split(' ')[0].replace(/-/g, '') : ''
       setClipTitle(date ? `${date}_${activeFeishuRecord.song_name}` : activeFeishuRecord.song_name)
@@ -875,7 +963,13 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       <div className="flex gap-3">
         <input
           value={url}
-          onChange={e => setUrl(e.target.value)}
+          onChange={e => {
+            const nextUrl = e.target.value
+            setUrl(nextUrl)
+            if (nextUrl.trim() !== loadedUrl && (videoInfo || infoRequestRef.current || activeFeishuRecord)) {
+              beginVideoSession()
+            }
+          }}
           placeholder="https://www.bilibili.com/video/BV..."
           className="flex-1 px-4 py-3 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-[var(--color-bili-blue)] focus:border-transparent outline-none transition"
           onKeyDown={e => { if (e.key === 'Enter') fetchInfo() }}
@@ -895,13 +989,29 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
         <label className="text-xs font-medium text-slate-500 flex-shrink-0">{t('common.saveTo')}:</label>
         <input
           value={clipOutputDir}
-          onChange={e => setClipOutputDir(e.target.value)}
+          onChange={e => {
+            clipOutputRevisionRef.current += 1
+            setClipOutputDir(e.target.value)
+          }}
           onBlur={() => {
-            if (clipOutputDir.trim()) {
-              apiClient.post('/api/clip/output-dir', { path: clipOutputDir.trim() }).then(res => {
-                setClipOutputDir(res.data.path || clipOutputDir)
-              }).catch(e => showToast({ tone: 'error', title: 'Failed to set output dir', message: getErrorMessage(e) }))
+            const nextPath = clipOutputDir.trim()
+            const configuredPath = useAppStore.getState().config?.download.clip_output_dir
+            if (!nextPath) {
+              clipOutputRevisionRef.current += 1
+              setClipOutputDir(configuredPath || '')
+              return
             }
+            if (nextPath === configuredPath) return
+            const revision = clipOutputRevisionRef.current
+            apiClient.post('/api/clip/output-dir', { path: nextPath }).then(res => {
+              const currentPath = useAppStore.getState().config?.download.clip_output_dir
+              if (clipOutputRevisionRef.current !== revision || currentPath !== configuredPath) return
+              if (res.data.config) useAppStore.getState().setConfig(res.data.config)
+              applyClipOutputDir(res.data.path || nextPath)
+            }).catch(e => {
+              if (clipOutputRevisionRef.current === revision) setClipOutputDir(configuredPath || '')
+              showToast({ tone: 'error', title: t('clipTask.outputDirFailed'), message: getErrorMessage(e) })
+            })
           }}
           placeholder="clips"
           className="flex-1 px-3 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none bg-white"
@@ -910,10 +1020,19 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
           onClick={async () => {
             const picked = await window.desktopAPI?.pickFolder?.(clipOutputDir)
             if (picked) {
+              clipOutputRevisionRef.current += 1
               setClipOutputDir(picked)
+              const revision = clipOutputRevisionRef.current
+              const configuredPath = useAppStore.getState().config?.download.clip_output_dir
               apiClient.post('/api/clip/output-dir', { path: picked }).then(res => {
-                setClipOutputDir(res.data.path || picked)
-              }).catch(e => showToast({ tone: 'error', title: 'Failed to set output dir', message: getErrorMessage(e) }))
+                const currentPath = useAppStore.getState().config?.download.clip_output_dir
+                if (clipOutputRevisionRef.current !== revision || currentPath !== configuredPath) return
+                if (res.data.config) useAppStore.getState().setConfig(res.data.config)
+                applyClipOutputDir(res.data.path || picked)
+              }).catch(e => {
+                if (clipOutputRevisionRef.current === revision) setClipOutputDir(configuredPath || '')
+                showToast({ tone: 'error', title: t('clipTask.outputDirFailed'), message: getErrorMessage(e) })
+              })
             }
           }}
           className="px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-600 hover:bg-slate-100 transition flex-shrink-0"
@@ -956,7 +1075,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                     className="px-2 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none"
                   >
                     {videoInfo.qualities.audio.map((a, i) => (
-                      <option key={a.id} value={i}>
+                      <option key={`${a.id}:${a.codecs}`} value={i}>
                         {formatBandwidth(a.bandwidth)} {a.codecs ? `(${a.codecs})` : ''}
                       </option>
                     ))}
@@ -972,7 +1091,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                     className="px-2 py-1.5 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-[var(--color-bili-blue)] outline-none"
                   >
                     {videoInfo.qualities.video.map((v, i) => (
-                      <option key={v.id} value={i}>
+                      <option key={`${v.id}:${v.codecs}`} value={i}>
                         {v.width}x{v.height} {formatBandwidth(v.bandwidth)} {v.codecs ? `(${v.codecs})` : ''}
                       </option>
                     ))}
@@ -1142,10 +1261,10 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
             </button>
           </div>
 
-          {clipTasks && clipTasks.filter(t => t.url === url).length > 0 && (
+          {clipTasks && clipTasks.filter(task => task.url.trim() === loadedUrl).length > 0 && (
             <div className="space-y-2 mt-2 max-w-xl">
               <div className="text-sm font-semibold text-slate-700 mb-2">{t('clipTask.tasksForVideo')}</div>
-              {clipTasks.filter(t => t.url === url).map(task => (
+              {clipTasks.filter(task => task.url.trim() === loadedUrl).map(task => (
                 <div key={task.id} className="bg-white border border-slate-200 rounded-lg p-3 shadow-sm flex flex-col gap-2">
                   <div className="flex justify-between items-center">
                     <span className="text-sm font-medium text-slate-800 truncate pr-2">{task.title}</span>
@@ -1153,7 +1272,20 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                       {(task.status === 'processing' || task.status === 'pending') && (
                         <button
                           onClick={() => {
-                            apiClient.post(`/api/clip/cancel/${task.id}`).catch(() => {})
+                            apiClient.post(`/api/clip/cancel/${task.id}`).then(() => {
+                              useAppStore.getState().upsertClipTask({
+                                ...task,
+                                status: 'error',
+                                message: 'Cancelled',
+                                file_path: '',
+                                updated_at: task.updated_at,
+                              })
+                              return apiClient.get<ClipTaskRecord[]>('/api/clip/tasks', { params: { _t: Date.now() } })
+                            }).then(response => {
+                              if (response) useAppStore.getState().mergeClipTasks(response.data)
+                            }).catch(error => {
+                              showToast({ tone: 'error', title: t('clipTask.failed'), message: getErrorMessage(error) })
+                            })
                           }}
                           className="text-[10px] text-slate-500 hover:text-red-500 hover:underline px-1 cursor-pointer"
                         >
@@ -1179,14 +1311,14 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                     <div className="flex items-center gap-2 mt-1">
                       <span className="text-xs text-green-600 truncate flex-1" title={task.file_path}>{task.file_path}</span>
                       <button
-                        onClick={() => apiClient.post('/api/clip/open-file', { filePath: task.file_path })}
+                        onClick={() => { void apiClient.post('/api/clip/open-file', { filePath: task.file_path }).catch(error => showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(error) })) }}
                         className="text-xs text-[var(--color-bili-blue)] hover:underline flex-shrink-0"
                         title={t('clipTask.openFile')}
                       >
                         {t('clipTask.openFile')}
                       </button>
                       <button
-                        onClick={() => apiClient.post('/api/clip/open-folder', { filePath: task.file_path })}
+                        onClick={() => { void apiClient.post('/api/clip/open-folder', { filePath: task.file_path }).catch(error => showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(error) })) }}
                         className="text-xs text-[var(--color-bili-blue)] hover:underline flex-shrink-0"
                         title={t('clipTask.openFolder')}
                       >

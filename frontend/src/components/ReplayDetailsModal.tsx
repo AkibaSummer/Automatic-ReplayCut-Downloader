@@ -1,11 +1,12 @@
 import { X, PlayCircle, FolderOpen, Database, Download, PauseCircle, Trash2 } from 'lucide-react'
-import { formatBytes, getErrorMessage, statusColor } from '../utils'
-import { useTranslation } from 'react-i18next'
+import { formatBytes, getErrorMessage } from '../utils'
 import { StatusPill } from './index'
-import React, { useMemo } from 'react'
+import { useMemo } from 'react'
 import { useAppStore } from '../store'
 import { useShallow } from 'zustand/react/shallow'
-import { AxiosInstance } from 'axios'
+import type { AxiosInstance } from 'axios'
+import type { Replay } from '../types'
+import { deleteReplayFile } from '../api/contracts'
 
 export interface ReplayDetailsModalProps {
   liveKey: string
@@ -24,10 +25,16 @@ export function ReplayDetailsModal({
   showToast,
   t
 }: ReplayDetailsModalProps) {
-  const replays = useAppStore(state => state.replays)
-  const replaceToast = useAppStore(state => state.replaceToast)
-  const paused = useAppStore(state => state.paused)
-  const buildApiUrl = useAppStore(state => state.buildApiUrl)
+  const { replays, replaceToast, paused, buildApiUrl, setReplays, patchReplay, upsertReplay, setProgressMap } = useAppStore(useShallow(state => ({
+    replays: state.replays,
+    replaceToast: state.replaceToast,
+    paused: state.paused,
+    buildApiUrl: state.buildApiUrl,
+    setReplays: state.setReplays,
+    patchReplay: state.patchReplay,
+    upsertReplay: state.upsertReplay,
+    setProgressMap: state.setProgressMap,
+  })))
   
   const selectedReplay = useMemo(() => replays.find(r => r.live_key === liveKey), [replays, liveKey])
 
@@ -44,11 +51,12 @@ export function ReplayDetailsModal({
       case 'failed': return <StatusPill label={t('dashboard.statusError')} tone="bad" />
       case 'paused': return <StatusPill label={t('dashboard.statusPaused')} tone="neutral" />
       case 'deleted': return <StatusPill label={t('dashboard.statusDeleted')} tone="neutral" />
+      case 'not_downloaded': return <StatusPill label={t('dashboard.statusNotDownloaded')} tone="neutral" />
       default: return <StatusPill label={r.status} tone="neutral" />
     }
   }
 
-  const isDownloading = selectedReplay.status === 'downloading' || selectedReplay.status === 'merging'
+  const isDownloading = ['pending', 'downloading', 'merging'].includes(selectedReplay.status)
   const isDone = selectedReplay.status === 'completed' || selectedReplay.status === 'done'
   const isDeleted = selectedReplay.status === 'deleted'
   const coverUrl = selectedReplay.local_cover ? buildApiUrl(`/covers/${selectedReplay.local_cover.replace(/^covers[/\\]/, '')}`) : ''
@@ -64,53 +72,93 @@ export function ReplayDetailsModal({
       return res
     } catch (e) {
       replaceToast(toastId, { tone: 'error', title: opts.errorTitle, message: getErrorMessage(e) })
-      throw e
+      return undefined
     }
+  }
+
+  const refreshReplays = async () => {
+    const res = await apiClient.get<Replay[]>('/api/replays', { params: { _t: Date.now() } })
+    setReplays(res.data || [])
   }
 
   const handleDownload = async () => {
     await toastAction({
-      loadingTitle: t('messages.starting'), successTitle: t('messages.started'), errorTitle: t('messages.startFailed'),
-      action: () => apiClient.post(`/api/replays/${liveKey}/download`),
+      loadingTitle: t('messages.starting'), loadingMessage: t('messages.creatingTask'), successTitle: t('messages.started'), successMessage: t('messages.watchProgress'), errorTitle: t('messages.startFailed'),
+      action: async () => {
+        const res = await apiClient.post(`/api/replays/${encodeURIComponent(liveKey)}/download`)
+        if (res.data?.ok === false) throw new Error(t('messages.operationRejected'))
+        patchReplay(liveKey, { status: 'pending', message: t('messages.queued'), progress: 0, speed: '', eta: '' })
+        void refreshReplays().catch(() => {})
+        return res
+      },
     })
   }
 
   const handlePause = async () => {
     await toastAction({
       loadingTitle: t('messages.pausing'), successTitle: t('messages.paused'), errorTitle: t('messages.pauseFailed'),
-      action: () => apiClient.post(`/api/replays/${liveKey}/pause`),
+      action: async () => {
+        const res = await apiClient.post(`/api/replays/${encodeURIComponent(liveKey)}/pause`)
+        if (res.data?.ok === false) throw new Error(t('messages.operationRejected'))
+        patchReplay(liveKey, { status: 'paused', message: t('common.paused'), speed: '', eta: '' })
+        void refreshReplays().catch(() => {})
+        return res
+      },
     })
   }
 
   const handleResume = async () => {
     await toastAction({
       loadingTitle: t('messages.resuming'), successTitle: t('messages.resumed'), errorTitle: t('messages.resumeFailed'),
-      action: () => apiClient.post(`/api/replays/${liveKey}/resume`),
+      action: async () => {
+        const res = await apiClient.post(`/api/replays/${encodeURIComponent(liveKey)}/resume`)
+        if (res.data?.ok === false) throw new Error(t('messages.operationRejected'))
+        patchReplay(liveKey, { status: 'pending', message: t('messages.resumed'), speed: '', eta: '' })
+        void refreshReplays().catch(() => {})
+        return res
+      },
     })
   }
 
   const handleCacheM3u8 = async () => {
     await toastAction({
-      loadingTitle: t('messages.starting'), successTitle: t('messages.started'), errorTitle: t('messages.startFailed'),
-      action: () => apiClient.post(`/api/replays/${liveKey}/cache-m3u8`),
+      loadingTitle: t('messages.caching'), loadingMessage: t('messages.fetchingM3u8'), successTitle: t('messages.cached'), successMessage: t('messages.savedM3u8'), errorTitle: t('messages.cacheFailed'),
+      action: async () => {
+        const res = await apiClient.post<Replay>(`/api/replays/${encodeURIComponent(liveKey)}/cache-m3u8`)
+        if (res.data?.live_key) upsertReplay(res.data)
+        return res
+      },
     })
   }
 
   const handleDelete = async () => {
     if (!window.confirm(t('messages.confirmDelete'))) return
-    await toastAction({
+    const res = await toastAction({
       loadingTitle: t('messages.deleting'), successTitle: t('messages.deleted'), errorTitle: t('messages.deleteFailed'),
-      action: () => apiClient.delete(`/api/replays/${liveKey}`),
+      action: async () => {
+        const response = await deleteReplayFile(apiClient, liveKey)
+        if (response.data?.live_key) upsertReplay(response.data)
+        setProgressMap(prev => {
+          const next = { ...prev }
+          delete next[liveKey]
+          return next
+        })
+        return response
+      },
     })
-    onClose()
+    if (res) onClose()
   }
 
   const handleOpenFile = async () => {
-    try { await apiClient.post('/api/clip/open-file', { filePath: selectedReplay.file_path }) } catch (e) {}
+    try { await apiClient.post('/api/clip/open-file', { filePath: selectedReplay.file_path }) } catch (e) {
+      showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(e) })
+    }
   }
 
   const handleOpenFolder = async () => {
-    try { await apiClient.post('/api/clip/open-folder', { filePath: selectedReplay.file_path }) } catch (e) {}
+    try { await apiClient.post('/api/clip/open-folder', { filePath: selectedReplay.file_path }) } catch (e) {
+      showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(e) })
+    }
   }
 
   return (
@@ -234,7 +282,7 @@ export function ReplayDetailsModal({
           </div>
           
           <div className="flex items-center gap-2">
-            {!isDownloading && !isDone && !isDeleted && (
+            {!isDownloading && !isDone && (
               <button
                 disabled={!backendOnline || (paused && selectedReplay.status !== 'paused')}
                 onClick={handleDownload}

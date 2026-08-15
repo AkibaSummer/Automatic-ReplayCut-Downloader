@@ -10,9 +10,11 @@ import { ClipPage } from './ClipPage'
 import { SettingsPage } from './SettingsPage'
 import { useAppStore } from './store'
 import { useShallow } from 'zustand/react/shallow'
-import { getErrorMessage } from './utils'
+import { getErrorMessage, isBackendReachableError } from './utils'
+import { quitDesktopApp, scanReplays } from './api/contracts'
 import { FileText, FolderOpen, X } from 'lucide-react'
 import { StatusPill } from './components/index'
+import type { Config, Me, Replay, ScanSummary } from './types'
 import React from 'react'
 
 function App() {
@@ -20,15 +22,15 @@ function App() {
   const {
     page, showLoginModal, setShowLoginModal, selectedLiveKey, setSelectedLiveKey,
     showTaskCenter, setShowTaskCenter, clipTasks,
-    config, setConfig, backendOnline, isScanning, isRefreshing, isSyncingAll,
+    config, setConfig, backendOnline, apiBase, isScanning, isSyncingAll, savingConfig, paused,
     setIsScanning, setIsRefreshing, setIsSyncingAll,
     apiClient, setReplays, setBackendOnline, showToast, replaceToast
   } = useAppStore(useShallow(state => ({
     page: state.page, showLoginModal: state.showLoginModal, setShowLoginModal: state.setShowLoginModal,
     selectedLiveKey: state.selectedLiveKey, setSelectedLiveKey: state.setSelectedLiveKey,
     showTaskCenter: state.showTaskCenter, setShowTaskCenter: state.setShowTaskCenter, clipTasks: state.clipTasks,
-    config: state.config, setConfig: state.setConfig, backendOnline: state.backendOnline,
-    isScanning: state.isScanning, isRefreshing: state.isRefreshing, isSyncingAll: state.isSyncingAll,
+    config: state.config, setConfig: state.setConfig, backendOnline: state.backendOnline, apiBase: state.apiBase,
+    isScanning: state.isScanning, isSyncingAll: state.isSyncingAll, savingConfig: state.savingConfig, paused: state.paused,
     setIsScanning: state.setIsScanning, setIsRefreshing: state.setIsRefreshing, setIsSyncingAll: state.setIsSyncingAll,
     apiClient: state.apiClient, setReplays: state.setReplays, setBackendOnline: state.setBackendOnline,
     showToast: state.showToast, replaceToast: state.replaceToast
@@ -39,10 +41,10 @@ function App() {
     if (opts?.notify) setIsRefreshing(true)
     try {
       const res = await apiClient.get('/api/replays', { params: { _t: Date.now() } })
-      const list = res.data || []
+      const list = (res.data || []) as Replay[]
       setReplays(list)
       useAppStore.getState().setProgressMap(prev => {
-        const liveKeys = new Set(list.map((r: any) => r.live_key))
+        const liveKeys = new Set(list.map(replay => replay.live_key))
         const next = { ...prev }
         for (const liveKey of Object.keys(next)) {
           if (!liveKeys.has(liveKey)) delete next[liveKey]
@@ -52,7 +54,7 @@ function App() {
       setBackendOnline(true)
       if (opts?.notify) showToast({ tone: 'success', title: t('common.refreshed') })
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
       if (opts?.notify) showToast({ tone: 'error', title: t('messages.refreshFailed'), message: getErrorMessage(e) })
     } finally {
       if (opts?.notify) setIsRefreshing(false)
@@ -66,7 +68,7 @@ function App() {
       useAppStore.getState().setRuntimeState(res.data)
       setBackendOnline(true)
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
     }
   }
 
@@ -78,6 +80,7 @@ function App() {
       useAppStore.getState().setDiskStats(res.data)
     } catch (e) {
       useAppStore.getState().setDiskStats(null)
+      setBackendOnline(isBackendReachableError(e))
     } finally {
       useAppStore.getState().setDiskStatsLoading(false)
     }
@@ -88,8 +91,16 @@ function App() {
     setIsScanning(true)
     const toastId = showToast({ tone: 'loading', title: t('messages.scanning'), message: t('messages.scanWait') })
     try {
-      const res = await apiClient.post('/api/replays/scan')
-      const summary = res.data
+      const res = await scanReplays(apiClient)
+      const raw = res.data || {}
+      const summary: ScanSummary = {
+        fetched: raw.fetched ?? raw.total ?? 0,
+        new_records: raw.new_records ?? raw.added ?? 0,
+        updated_records: raw.updated_records ?? raw.updated ?? 0,
+        covers_updated: raw.covers_updated ?? 0,
+        marked_deleted: raw.marked_deleted ?? 0,
+        already_up_to_date: raw.already_up_to_date ?? 0,
+      }
       setBackendOnline(true)
       replaceToast(toastId, {
         tone: 'success', title: t('messages.scanSuccess'), durationMs: 15000,
@@ -97,7 +108,7 @@ function App() {
       })
       await fetchReplays({ notify: false })
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
       replaceToast(toastId, { tone: 'error', title: t('messages.scanFailed'), message: getErrorMessage(e) })
     } finally {
       setIsScanning(false)
@@ -109,11 +120,12 @@ function App() {
     setIsSyncingAll(true)
     const toastId = showToast({ tone: 'loading', title: t('messages.starting'), message: t('messages.syncAllPending') })
     try {
-      const res = await apiClient.post('/api/sync-all')
+      await apiClient.post('/api/download-unfinished')
       setBackendOnline(true)
       replaceToast(toastId, { tone: 'success', title: t('messages.started'), message: t('messages.syncAllStarted') })
+      await fetchReplays({ notify: false })
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
       replaceToast(toastId, { tone: 'error', title: t('messages.startFailed'), message: getErrorMessage(e) })
     } finally {
       setIsSyncingAll(false)
@@ -126,11 +138,12 @@ function App() {
     useAppStore.getState().setSavingConfig(true)
     const toastId = showToast({ tone: 'loading', title: t('messages.saving') })
     try {
-      await apiClient.post('/api/config', newConf)
+      const res = await apiClient.post<Config>('/api/config', newConf)
+      if (res.data?.download) setConfig(res.data)
       setBackendOnline(true)
       replaceToast(toastId, { tone: 'success', title: t('messages.saveSuccess') })
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
       replaceToast(toastId, { tone: 'error', title: t('messages.saveFailed'), message: getErrorMessage(e) })
     } finally {
       useAppStore.getState().setSavingConfig(false)
@@ -138,16 +151,31 @@ function App() {
   }
 
   const handleQuitApp = async () => {
-    try { await apiClient.post('/api/quit') } catch (e) {}
-  }
-
-  const openDirModal = async () => {
-    // will be handled in SettingsPage via old approach, or I can implement here.
-    // We already passed `openDirModal` down.
-    // wait, where is DirModal state?
+    if (!window.desktopAPI?.quitApp) {
+      showToast({ tone: 'error', title: t('messages.quitFailed'), message: t('messages.quitUnavailable') })
+      return
+    }
+    try {
+      await quitDesktopApp(window.desktopAPI)
+    } catch (e) {
+      showToast({ tone: 'error', title: t('messages.quitFailed'), message: getErrorMessage(e) })
+    }
   }
 
   const [dirModalOpen, setDirModalOpen] = React.useState(false)
+
+  const handleLoginSuccess = React.useCallback(async () => {
+    try {
+      const res = await apiClient.get<Me>('/api/me', { params: { _t: Date.now() } })
+      useAppStore.getState().setMe(res.data)
+      setBackendOnline(true)
+    } catch (e) {
+      setBackendOnline(isBackendReachableError(e))
+      showToast({ tone: 'error', title: t('messages.loginRefreshFailed'), message: getErrorMessage(e) })
+    } finally {
+      setShowLoginModal(false)
+    }
+  }, [apiClient, setBackendOnline, setShowLoginModal, showToast, t])
 
   return (
     <>
@@ -175,18 +203,18 @@ function App() {
               <SettingsPage
                 config={config}
                 setConfig={setConfig}
-                savingConfig={useAppStore.getState().savingConfig}
+                savingConfig={savingConfig}
                 handleSaveConfig={() => handleSaveConfig()}
                 handleQuitApp={handleQuitApp}
                 backendOnline={backendOnline}
-                paused={useAppStore.getState().paused}
+                paused={paused}
                 openDirModal={() => setDirModalOpen(true)}
                 t={t}
               />
             )}
 
             <div style={{ display: page === 'clip' ? undefined : 'none' }}>
-              <ClipPage apiClient={apiClient} apiBase={useAppStore.getState().apiBase} showToast={showToast} t={t} clipTasks={clipTasks} />
+              <ClipPage apiClient={apiClient} apiBase={apiBase} showToast={showToast} t={t} clipTasks={clipTasks} />
             </div>
           </div>
         </main>
@@ -220,7 +248,7 @@ function App() {
       )}
 
       {showLoginModal && (
-        <LoginModal apiClient={apiClient} onClose={() => setShowLoginModal(false)} onSuccess={() => { setShowLoginModal(false); /* fetchMe inside AppController will auto-refresh */ }} />
+        <LoginModal apiClient={apiClient} onClose={() => setShowLoginModal(false)} onSuccess={handleLoginSuccess} />
       )}
 
       {showTaskCenter && (
@@ -271,14 +299,14 @@ function App() {
                       </div>
                       <div className="flex items-center gap-2">
                         <button
-                          onClick={() => apiClient.post('/api/clip/open-file', { filePath: task.file_path })}
+                          onClick={() => { void apiClient.post('/api/clip/open-file', { filePath: task.file_path }).catch(error => showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(error) })) }}
                           className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition"
                         >
                           <FileText className="w-3 h-3" />
                           {t('clipTask.openFile')}
                         </button>
                         <button
-                          onClick={() => apiClient.post('/api/clip/open-folder', { filePath: task.file_path })}
+                          onClick={() => { void apiClient.post('/api/clip/open-folder', { filePath: task.file_path }).catch(error => showToast({ tone: 'error', title: t('messages.openFailed'), message: getErrorMessage(error) })) }}
                           className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition"
                         >
                           <FolderOpen className="w-3 h-3" />

@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store'
 import { useShallow } from 'zustand/react/shallow'
-import { getErrorMessage, shouldUseRealtimeProgress } from '../utils'
+import { getErrorMessage, isBackendReachableError, mergeRealtimeProgress, shouldUseRealtimeProgress } from '../utils'
 import type { Replay, DiskStats, Runtime, ClipTaskRecord } from '../types'
 
 export function AppController() {
@@ -10,12 +10,12 @@ export function AppController() {
   const {
     apiBase, apiClient, buildWsUrl,
     setBackendOnline, setWsOnline,
-    setReplays, setProgressMap,
+    setReplays, patchReplay, setProgressMap,
     setDiskStats, setDiskStatsLoading,
     setRuntimeState, setPaused,
-    setClipTasks,
-    replays, activeDownloading,
-    showToast, replaceToast
+    mergeClipTasks, upsertClipTask,
+    hasActiveReplay,
+    showToast
   } = useAppStore(useShallow(state => ({
 
     apiBase: state.apiBase,
@@ -24,21 +24,22 @@ export function AppController() {
     setBackendOnline: state.setBackendOnline,
     setWsOnline: state.setWsOnline,
     setReplays: state.setReplays,
+    patchReplay: state.patchReplay,
     setProgressMap: state.setProgressMap,
     setDiskStats: state.setDiskStats,
     setDiskStatsLoading: state.setDiskStatsLoading,
     setRuntimeState: state.setRuntimeState,
     setPaused: state.setPaused,
-    setClipTasks: state.setClipTasks,
-    replays: state.replays,
-    activeDownloading: state.replays.filter(r => r.status === 'downloading' || r.status === 'merging').length,
+    mergeClipTasks: state.mergeClipTasks,
+    upsertClipTask: state.upsertClipTask,
+    hasActiveReplay:
+      state.replays.some(replay => ['pending', 'downloading', 'merging'].includes(replay.status)) ||
+      Object.values(state.progressMap).some(progress => ['pending', 'downloading', 'merging'].includes(progress.status)),
     showToast: state.showToast,
-    replaceToast: state.replaceToast
   
-})))
+  })))
 
   const diskStatsErrorShown = useRef(false)
-  const hasActiveReplay = activeDownloading > 0
 
   // Determine apiBase
   useEffect(() => {
@@ -62,62 +63,6 @@ export function AppController() {
     }
   }, [])
 
-  // WebSocket
-  useEffect(() => {
-    if (!apiBase) return
-    let ws: WebSocket
-    let healthTimer: number
-
-    const connect = () => {
-      ws = new WebSocket(buildWsUrl('/api/ws'))
-      ws.onopen = () => {
-        setWsOnline(true)
-        healthTimer = window.setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }))
-          }
-        }, 15000)
-      }
-      ws.onclose = () => {
-        setWsOnline(false)
-        window.clearInterval(healthTimer)
-        window.setTimeout(connect, 3000)
-      }
-      ws.onerror = () => {
-        setWsOnline(false)
-      }
-      ws.onmessage = (e) => {
-        const data = JSON.parse(e.data)
-        if (data.type === 'pong') return
-        setProgressMap(prev => {
-          const item = prev[data.live_key] || {
-            live_key: data.live_key, progress: 0, merge_progress: 0, status: '', message: '', speed: '', speed_history: [], elapsed: '', eta: ''
-          }
-          return {
-            ...prev,
-            [data.live_key]: {
-              ...item,
-              progress: data.progress ?? item.progress,
-              merge_progress: data.merge_progress ?? item.merge_progress,
-              status: data.status || item.status,
-              message: data.message || item.message,
-              speed: data.speed || item.speed,
-              elapsed: data.elapsed || item.elapsed,
-              eta: data.eta || item.eta,
-            }
-          }
-        })
-        if (data.status === 'completed' || data.status === 'failed') fetchReplays()
-      }
-    }
-    connect()
-    return () => {
-      window.clearInterval(healthTimer)
-      setWsOnline(false)
-      ws.close()
-    }
-  }, [apiBase, buildWsUrl, setProgressMap, setWsOnline])
-
   const fetchReplays = useCallback(async () => {
     try {
       const res = await apiClient.get('/api/replays', { params: { _t: Date.now() } })
@@ -140,9 +85,103 @@ export function AppController() {
       })
       setBackendOnline(true)
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
     }
   }, [apiClient, setReplays, setProgressMap, setBackendOnline])
+
+  // WebSocket
+  useEffect(() => {
+    if (!apiBase) return
+    let ws: WebSocket
+    let healthTimer: number
+    let reconnectTimer: number
+    let disposed = false
+
+    const connect = () => {
+      ws = new WebSocket(buildWsUrl('/ws'))
+      ws.onopen = () => {
+        setWsOnline(true)
+        void fetchReplays()
+        apiClient.get('/api/clip/tasks', { params: { _t: Date.now() } })
+          .then(res => mergeClipTasks(res.data as ClipTaskRecord[]))
+          .catch(() => {})
+        healthTimer = window.setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }))
+          }
+        }, 15000)
+      }
+      ws.onclose = () => {
+        setWsOnline(false)
+        window.clearInterval(healthTimer)
+        if (!disposed) reconnectTimer = window.setTimeout(connect, 3000)
+      }
+      ws.onerror = () => {
+        setWsOnline(false)
+      }
+      ws.onmessage = (e) => {
+        let data: any
+        try {
+          data = JSON.parse(e.data)
+        } catch {
+          return
+        }
+        if (data.type === 'pong') return
+        if (data.type === 'clip_task_update') {
+          const task = data.data as ClipTaskRecord | undefined
+          if (!task || !Number.isFinite(task.id)) return
+          upsertClipTask(task)
+          if (task.status === 'done') {
+            showToast({ tone: 'success', title: t('clipTask.completed'), message: task.title })
+          } else if (task.status === 'error') {
+            showToast({ tone: 'error', title: t('clipTask.failed'), message: task.message })
+          }
+          return
+        }
+        if (!data.live_key) return
+        const liveKey = String(data.live_key)
+        const currentProgress = useAppStore.getState().progressMap[liveKey] || {
+          live_key: liveKey,
+          updated_at: '',
+          progress: 0,
+          merge_progress: 0,
+          status: '',
+          message: '',
+          speed: '',
+          speed_history: [],
+          elapsed: '',
+          eta: '',
+        }
+        const nextProgress = mergeRealtimeProgress(currentProgress, data)
+        setProgressMap(prev => {
+          return {
+            ...prev,
+            [liveKey]: nextProgress,
+          }
+        })
+        const replay = useAppStore.getState().replays.find(item => item.live_key === liveKey)
+        if (replay && shouldUseRealtimeProgress(nextProgress, replay)) {
+          patchReplay(liveKey, {
+            status: nextProgress.status || replay.status,
+            progress: nextProgress.progress,
+            message: nextProgress.message,
+            speed: nextProgress.speed,
+            elapsed: nextProgress.elapsed,
+            eta: nextProgress.eta,
+          })
+        }
+        if (data.status === 'completed' || data.status === 'failed') void fetchReplays()
+      }
+    }
+    connect()
+    return () => {
+      disposed = true
+      window.clearInterval(healthTimer)
+      window.clearTimeout(reconnectTimer)
+      setWsOnline(false)
+      if (ws) ws.close()
+    }
+  }, [apiBase, apiClient, buildWsUrl, fetchReplays, mergeClipTasks, patchReplay, setProgressMap, setWsOnline, showToast, t, upsertClipTask])
 
   const fetchDiskStats = useCallback(async () => {
     if (!apiBase || !useAppStore.getState().backendOnline) return
@@ -154,6 +193,7 @@ export function AppController() {
       diskStatsErrorShown.current = false
     } catch (e) {
       setDiskStats(null)
+      setBackendOnline(isBackendReachableError(e))
       if (!diskStatsErrorShown.current) {
         diskStatsErrorShown.current = true
         const status = (e as any)?.response?.status
@@ -163,7 +203,7 @@ export function AppController() {
     } finally {
       setDiskStatsLoading(false)
     }
-  }, [apiBase, apiClient, setDiskStats, setDiskStatsLoading, showToast, t])
+  }, [apiBase, apiClient, setBackendOnline, setDiskStats, setDiskStatsLoading, showToast, t])
 
   const fetchRuntime = useCallback(async () => {
     try {
@@ -173,7 +213,7 @@ export function AppController() {
       setRuntimeState(rt)
       setBackendOnline(true)
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
     }
   }, [apiClient, setPaused, setRuntimeState, setBackendOnline])
 
@@ -183,7 +223,7 @@ export function AppController() {
       useAppStore.getState().setConfig(res.data)
       setBackendOnline(true)
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
     }
   }, [apiClient, setBackendOnline])
 
@@ -193,35 +233,35 @@ export function AppController() {
       useAppStore.getState().setMe(res.data)
       setBackendOnline(true)
     } catch (e) {
-      setBackendOnline(false)
+      setBackendOnline(isBackendReachableError(e))
     }
   }, [apiClient, setBackendOnline])
 
   const fetchClipTasks = useCallback(async () => {
     try {
       const res = await apiClient.get('/api/clip/tasks')
-      setClipTasks(res.data as ClipTaskRecord[])
+      mergeClipTasks(res.data as ClipTaskRecord[])
     } catch (e) {
-      // ignore
+      setBackendOnline(isBackendReachableError(e))
     }
-  }, [apiClient, setClipTasks])
+  }, [apiClient, mergeClipTasks, setBackendOnline])
 
   // Initial loads
   useEffect(() => {
     if (!apiBase) return
-    fetchReplays()
-    fetchConfig()
-    fetchMe()
-    fetchClipTasks()
-  }, [apiBase])
+    void fetchReplays()
+    void fetchConfig()
+    void fetchMe()
+    void fetchClipTasks()
+  }, [apiBase, fetchClipTasks, fetchConfig, fetchMe, fetchReplays])
 
   // Timers
   useEffect(() => {
-    fetchDiskStats()
-    const intervalMs = activeDownloading > 0 ? 15000 : 60000
+    void fetchDiskStats()
+    const intervalMs = hasActiveReplay ? 15000 : 60000
     const t = window.setInterval(fetchDiskStats, intervalMs)
     return () => window.clearInterval(t)
-  }, [fetchDiskStats, activeDownloading])
+  }, [fetchDiskStats, hasActiveReplay])
 
   useEffect(() => {
     if (!apiBase || !useAppStore.getState().backendOnline || !hasActiveReplay) return
@@ -233,7 +273,7 @@ export function AppController() {
     if (!apiBase) return
     const intervalMs = hasActiveReplay ? 5000 : 30000
     const timer = window.setInterval(fetchRuntime, intervalMs)
-    fetchRuntime()
+    void fetchRuntime()
     return () => window.clearInterval(timer)
   }, [apiBase, fetchRuntime, hasActiveReplay])
 

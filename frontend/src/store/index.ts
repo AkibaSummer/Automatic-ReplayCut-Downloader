@@ -21,8 +21,6 @@ interface AppState {
   setSidebarOpen: (open: boolean) => void
   showAdvanced: boolean
   setShowAdvanced: (show: boolean) => void
-  exportUseProxy: boolean
-  setExportUseProxy: (use: boolean) => void
   showLoginModal: boolean
   setShowLoginModal: (show: boolean) => void
   selectedLiveKey: string | null
@@ -65,10 +63,14 @@ interface AppState {
   // --- Domain Data ---
   replays: Replay[]
   setReplays: (replays: Replay[]) => void
+  patchReplay: (liveKey: string, patch: Partial<Replay>) => void
+  upsertReplay: (replay: Replay) => void
   progressMap: Record<string, Progress>
   setProgressMap: (map: Record<string, Progress> | ((prev: Record<string, Progress>) => Record<string, Progress>)) => void
   clipTasks: ClipTaskRecord[]
   setClipTasks: (tasks: ClipTaskRecord[]) => void
+  mergeClipTasks: (tasks: ClipTaskRecord[]) => void
+  upsertClipTask: (task: ClipTaskRecord) => void
   runtimeState: Runtime | null
   setRuntimeState: (state: Runtime | null) => void
   paused: boolean
@@ -89,8 +91,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   showAdvanced: false,
   setShowAdvanced: (showAdvanced) => set({ showAdvanced }),
-  exportUseProxy: false,
-  setExportUseProxy: (exportUseProxy) => set({ exportUseProxy }),
   showLoginModal: false,
   setShowLoginModal: (showLoginModal) => set({ showLoginModal }),
   selectedLiveKey: null,
@@ -143,12 +143,28 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   replays: [],
   setReplays: (replays) => set({ replays }),
+  patchReplay: (liveKey, patch) => set((state) => ({
+    replays: state.replays.map(replay => replay.live_key === liveKey ? { ...replay, ...patch } : replay)
+  })),
+  upsertReplay: (replay) => set((state) => {
+    const index = state.replays.findIndex(item => item.live_key === replay.live_key)
+    if (index < 0) return { replays: [replay, ...state.replays] }
+    const replays = [...state.replays]
+    replays[index] = replay
+    return { replays }
+  }),
   progressMap: {},
   setProgressMap: (mapOrFn) => set((state) => ({
     progressMap: typeof mapOrFn === 'function' ? mapOrFn(state.progressMap) : mapOrFn
   })),
   clipTasks: [],
   setClipTasks: (clipTasks) => set({ clipTasks }),
+  mergeClipTasks: (tasks) => set((state) => ({
+    clipTasks: mergeClipTaskRecords(state.clipTasks, tasks)
+  })),
+  upsertClipTask: (task) => set((state) => ({
+    clipTasks: mergeClipTaskRecords(state.clipTasks, [task])
+  })),
   runtimeState: null,
   setRuntimeState: (runtimeState) => set({ runtimeState }),
   paused: false,
@@ -191,3 +207,39 @@ export const useAppStore = create<AppState>((set, get) => ({
     set((state) => ({ toasts: state.toasts.filter(t => t.id !== id) }))
   }
 }))
+
+const clipTaskStatusRank: Record<ClipTaskRecord['status'], number> = {
+  pending: 0,
+  processing: 1,
+  done: 2,
+  error: 2,
+}
+
+function shouldReplaceClipTask(current: ClipTaskRecord, incoming: ClipTaskRecord) {
+  const currentUpdated = Date.parse(current.updated_at)
+  const incomingUpdated = Date.parse(incoming.updated_at)
+  if (Number.isFinite(currentUpdated) && Number.isFinite(incomingUpdated) && currentUpdated !== incomingUpdated) {
+    return incomingUpdated > currentUpdated
+  }
+
+  const currentRank = clipTaskStatusRank[current.status] ?? 0
+  const incomingRank = clipTaskStatusRank[incoming.status] ?? 0
+  if (currentRank !== incomingRank) return incomingRank > currentRank
+  return incoming.progress >= current.progress
+}
+
+function mergeClipTaskRecords(current: ClipTaskRecord[], incoming: ClipTaskRecord[]) {
+  const byId = new Map(current.map(task => [task.id, task]))
+  for (const task of incoming) {
+    const existing = byId.get(task.id)
+    if (!existing || shouldReplaceClipTask(existing, task)) byId.set(task.id, task)
+  }
+  return [...byId.values()].sort((left, right) => {
+    const leftCreated = Date.parse(left.created_at)
+    const rightCreated = Date.parse(right.created_at)
+    if (Number.isFinite(leftCreated) && Number.isFinite(rightCreated) && leftCreated !== rightCreated) {
+      return rightCreated - leftCreated
+    }
+    return right.id - left.id
+  })
+}

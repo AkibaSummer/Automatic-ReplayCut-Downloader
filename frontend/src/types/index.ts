@@ -39,18 +39,34 @@ export interface StreamSlice {
 export interface Config {
   bilibili: {
     anchor_id: number
+    cookies: Record<string, string>
+    cookie_file: string
   }
   download: {
     output_dir: string
+    temp_dir: string
     filename_template: string
     max_concurrent_tasks: number
     concurrent_segments: number
     clip_output_dir: string
   }
+  database: {
+    dsn: string
+  }
+  server: {
+    port: number
+  }
+  feishu: {
+    app_id: string
+    app_secret: string
+    base_token: string
+    table_id: string
+  }
 }
 
 export interface Progress {
   live_key: string
+  updated_at?: string
   progress: number
   merge_progress: number
   status: string

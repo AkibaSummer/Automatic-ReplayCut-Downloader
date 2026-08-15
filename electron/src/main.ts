@@ -17,6 +17,7 @@ let backendStop: (() => Promise<void>) | null = null
 let backendBaseURL = ''
 
 const isDev = !app.isPackaged
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
 
 async function createMainWindow() {
   mainWindow = new BrowserWindow({
@@ -64,7 +65,10 @@ async function createMainWindow() {
 }
 
 async function boot() {
-  const backend = await startDesktopBackend({ baseDir: process.cwd() })
+  // Packaged builds are portable: keep config/database resolution anchored to
+  // the executable instead of the caller's current working directory.
+  const baseDir = isDev ? process.cwd() : path.dirname(process.execPath)
+  const backend = await startDesktopBackend({ baseDir })
   backendBaseURL = backend.baseURL
   backendStop = backend.stop
 
@@ -86,9 +90,25 @@ async function boot() {
   await createMainWindow()
 }
 
-app.whenReady().then(() => {
-  void boot()
-})
+if (!hasSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  })
+
+  app.whenReady().then(() => {
+    void boot().catch(error => {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error('[main] Failed to start:', error)
+      dialog.showErrorBox('Application failed to start', message)
+      app.quit()
+    })
+  })
+}
 
 app.on('window-all-closed', () => {
   app.quit()

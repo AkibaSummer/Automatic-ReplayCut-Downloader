@@ -21,6 +21,22 @@ if (ffmpegResolved) {
 
 export type ClipMode = 'copy' | 'reencode' | 'smart'
 export type ClipProgressCallback = (progress: number, message?: string) => void
+export type ClipQualitySelection = {
+  audioId?: number
+  audioCodec?: string
+  videoId?: number
+  videoCodec?: string
+}
+
+function abortError() {
+  const error = new Error('aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function throwIfAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw abortError()
+}
 
 export class ClipService {
   constructor(
@@ -34,36 +50,42 @@ export class ClipService {
     audioQualityIndex: number = 0, videoQualityIndex: number = 0,
     onProgress?: ClipProgressCallback,
     prefixCut: boolean = true, suffixTime: boolean = true,
-    clipMode: ClipMode = 'copy', signal?: AbortSignal
+    clipMode: ClipMode = 'copy', signal?: AbortSignal,
+    qualitySelection?: ClipQualitySelection,
   ) {
+    throwIfAborted(signal)
     if (startTime < 0) startTime = 0
     if (endTime <= startTime) throw new Error('结束时间必须大于开始时间')
 
     onProgress?.(0, '获取视频信息...')
-    const info = await this.bilibiliClient.getBilibiliVideoInfo(rawUrl)
+    const info = await this.bilibiliClient.getBilibiliVideoInfo(rawUrl, signal)
+    throwIfAborted(signal)
     if (endTime > info.duration) endTime = info.duration
     if (endTime <= startTime) throw new Error(`结束时间(${endTime})必须大于开始时间(${startTime})，视频总时长仅 ${info.duration}s`)
 
-    let audioUrl = info.audioUrl
-    let videoUrl = ''
-
-    const parsed = this.bilibiliClient.parseBilibiliUrl(rawUrl)
-    if (parsed) {
-      const queryParam = parsed.type === 'bv' ? `bvid=${parsed.id}` : `aid=${parsed.id}`
-      const playUrl = await this.bilibiliClient.fetchJSON<{ code: number; data: { dash?: { audio: Array<{ base_url: string }>, video: Array<{ base_url: string }> } } }>(
-        `https://api.bilibili.com/x/player/playurl?${queryParam}&cid=${info.cid}&qn=127&fourk=1&fnval=4048`,
-      )
-      if (playUrl?.data?.dash) {
-        if (playUrl.data.dash.audio && playUrl.data.dash.audio[audioQualityIndex]) {
-          audioUrl = playUrl.data.dash.audio[audioQualityIndex].base_url
-        }
-        if (playUrl.data.dash.video && playUrl.data.dash.video[videoQualityIndex]) {
-          videoUrl = playUrl.data.dash.video[videoQualityIndex].base_url
-        } else if (playUrl.data.dash.video && playUrl.data.dash.video[0]) {
-          videoUrl = playUrl.data.dash.video[0].base_url
-        }
-      }
+    // Use the exact, already-normalized quality list returned to the UI. A
+    // second playurl request can be downgraded or ordered differently, making
+    // the submitted indexes select another stream (or no stream at all).
+    const audioQualities = info.qualities?.audio || []
+    const videoQualities = info.qualities?.video || []
+    const selectedAudio = qualitySelection?.audioId !== undefined
+      ? audioQualities.find(quality => quality.id === qualitySelection.audioId
+          && (!qualitySelection.audioCodec || quality.codecs === qualitySelection.audioCodec))
+      : (audioQualities[audioQualityIndex] || audioQualities[0])
+    const selectedVideo = qualitySelection?.videoId !== undefined
+      ? videoQualities.find(quality => quality.id === qualitySelection.videoId
+          && (!qualitySelection.videoCodec || quality.codecs === qualitySelection.videoCodec))
+      : (videoQualities[videoQualityIndex] || videoQualities[0])
+    if (qualitySelection?.audioId !== undefined && !selectedAudio) {
+      throw new Error('所选音频质量已不可用，请刷新视频信息后重试')
     }
+    if (qualitySelection?.videoId !== undefined && !selectedVideo) {
+      throw new Error('所选视频质量已不可用，请刷新视频信息后重试')
+    }
+    const audioUrl = selectedAudio?.baseUrl || info.audioUrl
+    const videoUrl = selectedVideo?.baseUrl || ''
+    const videoCodec = selectedVideo?.codecs || ''
+    if (!videoUrl) throw new Error('此视频没有提供可用的 DASH 视频流')
 
     const clipDir = resolveAppPathWithBase(this.baseDir, this.config.download.clip_output_dir || path.join(this.config.download.output_dir, 'clips'))
     ensureDir(clipDir)
@@ -72,42 +94,90 @@ export class ClipService {
     if (prefixCut) fileName = `[cut] ${fileName}`
     if (suffixTime) fileName = `${fileName} (${ts})`
     fileName = sanitizeFilename(fileName)
-    const outPath = uniquePath(path.join(clipDir, `${fileName}.mp4`))
-    fs.writeFileSync(outPath, '')
+    const desiredPath = path.join(clipDir, `${fileName}.mp4`)
 
     const cookie = this.bilibiliClient.cookieHeader()
     const headers = `Referer: https://live.bilibili.com/\r\nUser-Agent: ${USER_AGENT}\r\nCookie: ${cookie}\r\n`
 
     const totalDuration = endTime - startTime
-    console.log(`[clip] Mode: ${clipMode}, Range: ${startTime}→${endTime} (${totalDuration.toFixed(1)}s)`)
+    const effectiveMode = this.resolveClipMode(clipMode, videoCodec)
+    const smartFallbackMessage = clipMode === 'smart' && effectiveMode === 'reencode'
+      ? `智能无损不支持所选视频编码 ${videoCodec}，已自动使用完整重编码`
+      : ''
+    console.log(`[clip] Mode: ${clipMode}${effectiveMode !== clipMode ? ` -> ${effectiveMode} (${videoCodec})` : ''}, Range: ${startTime}→${endTime} (${totalDuration.toFixed(1)}s)`)
 
     let result: { size: number; message?: string }
 
     // Both modes download locally first for stability, then process from local file
-    const tempDir = path.join(this.config.download.temp_dir, `clip_${Date.now()}`)
-    ensureDir(tempDir)
+    const tempRoot = resolveAppPathWithBase(this.baseDir, this.config.download.temp_dir)
+    ensureDir(tempRoot)
+    const tempDir = fs.mkdtempSync(path.join(tempRoot, 'clip-'))
+    let outPath = ''
+    let partPath = ''
     try {
-      if (clipMode === 'smart') {
-        result = await this.localSmartCut(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress, signal)
-      } else if (clipMode === 'copy') {
-        result = await this.localCopyCut(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress, signal)
+      ;({ outPath, partPath } = this.reserveOutputPath(desiredPath))
+      if (effectiveMode === 'smart') {
+        result = await this.localSmartCut(videoUrl, audioUrl, headers, startTime, endTime, partPath, tempDir, onProgress, signal)
+      } else if (effectiveMode === 'copy') {
+        result = await this.localCopyCut(videoUrl, audioUrl, headers, startTime, endTime, partPath, tempDir, onProgress, signal)
       } else {
-        result = await this.localReencode(videoUrl, audioUrl, headers, startTime, endTime, outPath, tempDir, onProgress, signal)
+        result = await this.localReencode(videoUrl, audioUrl, headers, startTime, endTime, partPath, tempDir, onProgress, signal)
       }
+      if (smartFallbackMessage) {
+        result.message = result.message ? `${smartFallbackMessage}；${result.message}` : smartFallbackMessage
+      }
+      throwIfAborted(signal)
+      if (!fs.existsSync(partPath) || fs.statSync(partPath).size === 0) {
+        throw new Error('Clip failed: output file is empty')
+      }
+      fs.renameSync(partPath, outPath)
+      result.size = fs.statSync(outPath).size
     } catch (err) {
-      if (fs.existsSync(outPath) && fs.statSync(outPath).size === 0) {
-        fs.unlinkSync(outPath)
-      }
+      if (partPath) await fs.promises.rm(partPath, { force: true }).catch(() => {})
       throw err
     } finally {
-      // DEBUG: keep temp dir
-      // await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {})
     }
 
     return {
       path: outPath, fileName: path.basename(outPath), size: result.size,
       title: info.title, duration: info.duration, startTime, endTime,
       message: result.message,
+    }
+  }
+
+  private resolveClipMode(requestedMode: ClipMode, videoCodec: string): ClipMode {
+    if (requestedMode !== 'smart') return requestedMode
+    const normalizedCodec = videoCodec.trim().toLowerCase()
+    if (!normalizedCodec) return requestedMode
+    return normalizedCodec.includes('avc1')
+      || normalizedCodec.includes('avc3')
+      || normalizedCodec.includes('h264')
+      ? requestedMode
+      : 'reencode'
+  }
+
+  private reserveOutputPath(desiredPath: string): { outPath: string; partPath: string } {
+    let outPath = uniquePath(desiredPath)
+    for (let suffix = 1; ; suffix += 1) {
+      if (fs.existsSync(outPath)) {
+        const ext = path.extname(desiredPath)
+        const stem = desiredPath.slice(0, -ext.length)
+        outPath = `${stem} (${suffix})${ext}`
+        continue
+      }
+      const outputExt = path.extname(outPath)
+      const partPath = `${outPath.slice(0, -outputExt.length)}.part${outputExt}`
+      try {
+        const fd = fs.openSync(partPath, 'wx')
+        fs.closeSync(fd)
+        return { outPath, partPath }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+        const ext = path.extname(desiredPath)
+        const stem = desiredPath.slice(0, -ext.length)
+        outPath = `${stem} (${suffix})${ext}`
+      }
     }
   }
 
@@ -143,6 +213,7 @@ export class ClipService {
       ],
       paddedPath,
       (sizeMB) => onProgress?.(Math.min(49, 1 + sizeMB * 0.3), `下载中... ${sizeMB.toFixed(1)} MB`),
+      signal,
     )
 
     if (!fs.existsSync(paddedPath) || fs.statSync(paddedPath).size === 0) {
@@ -156,7 +227,7 @@ export class ClipService {
     // may correspond to a stream time earlier than paddedStart.
     // We compute this offset from the GOP interval so that relStart/relEnd
     // correctly map to the user's selected times.
-    const keyframes = await this.findKeyframes(paddedPath)
+    const keyframes = await this.findKeyframes(paddedPath, signal)
     const gop = keyframes.length >= 2 ? keyframes[1] - keyframes[0] : 5
     const seekOffset = gop > 0 ? (paddedStart % gop) : 0
     const relStart = (startTime - paddedStart) + seekOffset
@@ -184,9 +255,9 @@ export class ClipService {
       '-avoid_negative_ts', 'make_zero',
       '-movflags', '+faststart',
       '-y', outPath,
-    ])
+    ], signal)
 
-    const actualDuration = await this.probeFileDuration(outPath)
+    const actualDuration = await this.probeFileDuration(outPath, signal)
     const msg = startDiff > 0.5
       ? `流复制完成（开头早 ${startDiff.toFixed(1)}s，对齐到关键帧）`
       : '流复制完成'
@@ -227,6 +298,7 @@ export class ClipService {
       ],
       rawPath,
       (sizeMB) => onProgress?.(Math.min(29, 1 + sizeMB * 0.3), `下载中... ${sizeMB.toFixed(1)} MB`),
+      signal,
     )
 
     if (!fs.existsSync(rawPath) || fs.statSync(rawPath).size === 0) {
@@ -235,12 +307,14 @@ export class ClipService {
     onProgress?.(30, '下载完成，分析关键帧...')
 
     // ── Step 2: Compute seek offset from GOP ──
-    // When ffmpeg uses `-ss` before `-i` with `-c copy`, it seeks to the
-    // nearest keyframe BEFORE paddedStart. The file starts at that keyframe,
-    // NOT at paddedStart. We need to correct for this offset.
-    const keyframes = await this.findKeyframes(rawPath)
+    // Measure where the requested seek point landed on the shared local A/V
+    // clock. A GOP modulo estimate is invalid for phased or variable GOPs.
+    const keyframes = await this.findKeyframes(rawPath, signal)
     const gop = keyframes.length >= 2 ? keyframes[1] - keyframes[0] : 5
-    const seekOffset = gop > 0 ? (paddedStart % gop) : 0
+    const audioTimelineStart = audioUrl
+      ? await this.probeFirstAudioPacketTimestamp(rawPath, signal)
+      : null
+    const seekOffset = audioTimelineStart ?? (gop > 0 ? (paddedStart % gop) : 0)
     const relStart = (startTime - paddedStart) + seekOffset
 
     console.log(`[reencode] GOP=${gop.toFixed(2)}s, seekOffset=${seekOffset.toFixed(2)}s, relStart=${relStart.toFixed(2)}s`)
@@ -264,6 +338,7 @@ export class ClipService {
       ],
       totalDuration,
       (pct, msg) => onProgress?.(35 + pct * 63, `重编码: ${msg}`),
+      signal,
     )
 
     onProgress?.(100, '重编码完成')
@@ -287,14 +362,17 @@ export class ClipService {
     // ── Step 1: Download raw clip ──
     const paddedStart = Math.max(0, startTime - PADDING)
     const paddedDuration = totalDuration + PADDING + 10
-    const rawVideoPath = path.join(tempDir, 'raw_video.mp4')
+    const rawVideoPath = path.join(tempDir, 'raw.mp4')
     
     onProgress?.(1, '下载中...')
-    console.log(`[smart] Step 1: Download raw video [${paddedStart}s, +${paddedDuration}s]`)
+    console.log(`[smart] Step 1: Download raw A/V clip [${paddedStart}s, +${paddedDuration}s]`)
     await this.runFfmpegWithFileProgress(
       [
         ...(videoUrl ? ['-ss', `${paddedStart}`, '-headers', headers, '-i', videoUrl] : []),
+        ...(audioUrl ? ['-ss', `${paddedStart}`, '-headers', headers, '-i', audioUrl] : []),
         '-t', `${paddedDuration}`,
+        '-map', '0:v:0',
+        '-map', audioUrl ? '1:a:0' : '0:a:0?',
         '-c', 'copy',
         '-avoid_negative_ts', 'make_zero',
         '-y', rawVideoPath,
@@ -310,9 +388,12 @@ export class ClipService {
 
     // ── Step 2: Extract Keyframes ──
     onProgress?.(30, '分析关键帧...')
-    const keyframes = await this.findKeyframes(rawVideoPath)
+    const keyframes = await this.findKeyframes(rawVideoPath, signal)
     const gop = keyframes.length >= 2 ? keyframes[1] - keyframes[0] : 5
-    const seekOffset = gop > 0 ? (paddedStart % gop) : 0
+    const audioTimelineStart = audioUrl
+      ? await this.probeFirstAudioPacketTimestamp(rawVideoPath, signal)
+      : null
+    const seekOffset = audioTimelineStart ?? (gop > 0 ? (paddedStart % gop) : 0)
     
     // Convert absolute user time to relative time in our padded raw file
     const relStart = (startTime - paddedStart) + seekOffset
@@ -428,12 +509,17 @@ export class ClipService {
 
     // ── Step 4: Extract Audio Global ──
     onProgress?.(80, '提取原始音频轨...')
+    // Keep audio on the exact local timeline used to build the video. Cutting
+    // the remote audio independently loses the video keyframe seek pre-roll.
     const audioPath = path.join(tempDir, 'audio.m4a')
     await this.runFfmpegWithFileProgress(
       [
-        ...(audioUrl ? ['-ss', `${startTime}`, '-headers', headers, '-i', audioUrl] : ['-ss', `${relStart}`, '-i', rawVideoPath]),
+        '-i', rawVideoPath,
+        '-ss', `${relStart}`,
         '-t', `${totalDuration}`,
+        '-map', '0:a:0',
         '-c:a', 'copy',
+        '-avoid_negative_ts', 'make_zero',
         '-y', audioPath
       ],
       audioPath,
@@ -446,6 +532,8 @@ export class ClipService {
     await this.runFfmpegCommand([
       '-i', concatVideoPath,
       '-i', audioPath,
+      '-map', '0:v:0',
+      '-map', '1:a:0',
       '-c', 'copy',
       '-shortest',
       '-movflags', '+faststart',
@@ -463,9 +551,10 @@ export class ClipService {
   // ═══════════════════════════════════════════════════════════════
 
 
-  private findKeyframes(filePath: string): Promise<number[]> {
+  private findKeyframes(filePath: string, signal?: AbortSignal): Promise<number[]> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     return new Promise<number[]>((resolve, reject) => {
+      if (signal?.aborted) return reject(abortError())
       const proc = spawn(ffmpegBin, [
         '-i', filePath,
         '-vf', 'select=eq(pict_type\\,I),showinfo',
@@ -473,8 +562,24 @@ export class ClipService {
       ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 
       let stderr = ''
+      let settled = false
+      const finish = (error?: Error, keyframes?: number[]) => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve(keyframes || [])
+      }
+      const onAbort = () => {
+        proc.kill('SIGTERM')
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
       proc.on('close', () => {
+        if (signal?.aborted) {
+          finish(abortError())
+          return
+        }
         const kfs: number[] = []
         const re = /pts_time:\s*([\d.]+)/g
         let m: RegExpExecArray | null
@@ -483,29 +588,104 @@ export class ClipService {
           if (Number.isFinite(t)) kfs.push(t)
         }
         kfs.sort((a, b) => a - b)
-        resolve(kfs.filter((v, i, a) => i === 0 || Math.abs(v - a[i - 1]) > 0.001))
+        finish(undefined, kfs.filter((v, i, a) => i === 0 || Math.abs(v - a[i - 1]) > 0.001))
       })
-      proc.on('error', (e) => reject(new Error(`关键帧检测失败: ${e.message}`)))
+      proc.on('error', (e) => finish(new Error(`关键帧检测失败: ${e.message}`)))
+    })
+  }
+
+  /**
+   * Return the first audio packet PTS without letting FFmpeg normalize the
+   * input timestamps. During a fast input seek the video begins at an earlier
+   * keyframe, while this audio packet stays close to the requested seek time;
+   * its local PTS is therefore the measured pre-roll on the shared A/V clock.
+   */
+  private probeFirstAudioPacketTimestamp(filePath: string, signal?: AbortSignal): Promise<number | null> {
+    const ffmpegBin = ffmpegResolved || 'ffmpeg'
+    return new Promise<number | null>((resolve, reject) => {
+      if (signal?.aborted) return reject(abortError())
+      const proc = spawn(ffmpegBin, [
+        '-hide_banner', '-loglevel', 'error', '-copyts',
+        '-i', filePath,
+        '-map', '0:a:0', '-frames:a', '1', '-c:a', 'copy',
+        '-f', 'framehash', '-',
+      ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+
+      let stdout = ''
+      let settled = false
+      const finish = (value: number | null, error?: Error) => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve(value)
+      }
+      const onAbort = () => {
+        proc.kill('SIGTERM')
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      proc.on('close', (code) => {
+        if (signal?.aborted) {
+          finish(null, abortError())
+          return
+        }
+        if (code !== 0) {
+          finish(null)
+          return
+        }
+
+        const timeBase = stdout.match(/^#tb\s+0:\s*(-?\d+)\/(\d+)\s*$/m)
+        const packet = stdout.match(/^\s*\d+\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,/m)
+        if (!timeBase || !packet) {
+          finish(null)
+          return
+        }
+
+        const numerator = Number(timeBase[1])
+        const denominator = Number(timeBase[2])
+        const pts = Number(packet[2])
+        const seconds = pts * numerator / denominator
+        finish(Number.isFinite(seconds) ? seconds : null)
+      })
+      proc.on('error', () => finish(null))
     })
   }
 
   /** Probe actual duration of a file via ffmpeg stderr metadata */
-  private probeFileDuration(filePath: string): Promise<number> {
+  private probeFileDuration(filePath: string, signal?: AbortSignal): Promise<number> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
-    return new Promise<number>((resolve) => {
+    return new Promise<number>((resolve, reject) => {
+      if (signal?.aborted) return reject(abortError())
       const proc = spawn(ffmpegBin, ['-i', filePath, '-f', 'null', '-'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       let stderr = ''
+      let settled = false
+      const finish = (value: number, error?: Error) => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve(value)
+      }
+      const onAbort = () => {
+        proc.kill('SIGTERM')
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
       proc.on('close', () => {
+        if (signal?.aborted) {
+          finish(0, abortError())
+          return
+        }
         // Parse "Duration: HH:MM:SS.ms" from metadata
         const m = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/)
         if (m) {
-          resolve(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number(m[4]) / 100)
+          finish(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number(m[4]) / 100)
         } else {
-          resolve(0)
+          finish(0)
         }
       })
-      proc.on('error', () => resolve(0))
+      proc.on('error', () => finish(0))
     })
   }
 
@@ -514,7 +694,7 @@ export class ClipService {
     
     const run = (extraArgs: string[]) => {
       return new Promise<void>((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error('aborted'))
+        if (signal?.aborted) return reject(abortError())
         let finalArgs = [...args]
         if (extraArgs.length > 0) {
           const outPath = finalArgs.pop()!
@@ -529,30 +709,39 @@ export class ClipService {
         console.log(`[ffmpeg] ${finalArgs.slice(0, 6).join(' ')} ...`)
         const proc = spawn(ffmpegBin, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
         let stderr = ''
+        let settled = false
+        const finish = (error?: Error) => {
+          if (settled) return
+          settled = true
+          signal?.removeEventListener('abort', onAbort)
+          if (error) reject(error)
+          else resolve()
+        }
         proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
 
         const onAbort = () => {
           proc.kill('SIGTERM')
-          reject(new Error('aborted'))
         }
         signal?.addEventListener('abort', onAbort, { once: true })
 
         proc.on('close', (code) => {
-          signal?.removeEventListener('abort', onAbort)
+          if (signal?.aborted) {
+            finish(abortError())
+            return
+          }
           if (code !== 0) {
             console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-            reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
-          } else resolve()
+            finish(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
+          } else finish()
         })
         proc.on('error', (e) => {
-          signal?.removeEventListener('abort', onAbort)
-          reject(new Error(`FFmpeg 启动失败: ${e.message}`))
+          finish(new Error(`FFmpeg 启动失败: ${e.message}`))
         })
       })
     }
 
     return run([]).catch(err => {
-      if (err instanceof Error && err.message.includes('tag for codec hevc')) {
+      if (!signal?.aborted && err instanceof Error && err.message.includes('tag for codec hevc')) {
         return run(['-tag:v', 'hvc1'])
       }
       throw err
@@ -568,7 +757,7 @@ export class ClipService {
     
     const run = (extraArgs: string[]) => {
       return new Promise<void>((resolve, reject) => {
-        if (signal?.aborted) return reject(new Error('aborted'))
+        if (signal?.aborted) return reject(abortError())
         let finalArgs = [...args]
         if (extraArgs.length > 0) {
           const outPath = finalArgs.pop()!
@@ -583,9 +772,19 @@ export class ClipService {
         console.log(`[ffmpeg] ${finalArgs.slice(0, 6).join(' ')} ...`)
         const proc = spawn(ffmpegBin, finalArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
         let stderr = ''
+        let settled = false
+        const finish = (error?: Error) => {
+          if (settled) return
+          settled = true
+          clearInterval(timer)
+          signal?.removeEventListener('abort', onAbort)
+          if (error) reject(error)
+          else resolve()
+        }
         proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
 
         const timer = setInterval(() => {
+          if (signal?.aborted || settled) return
           try {
             if (fs.existsSync(outputPath)) onSize(fs.statSync(outputPath).size / 1024 / 1024)
           } catch {}
@@ -593,28 +792,27 @@ export class ClipService {
 
         const onAbort = () => {
           proc.kill('SIGTERM')
-          reject(new Error('aborted'))
         }
         signal?.addEventListener('abort', onAbort, { once: true })
 
         proc.on('close', (code) => {
-          clearInterval(timer)
-          signal?.removeEventListener('abort', onAbort)
+          if (signal?.aborted) {
+            finish(abortError())
+            return
+          }
           if (code !== 0) {
             console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-            reject(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
-          } else resolve()
+            finish(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
+          } else finish()
         })
         proc.on('error', (e) => { 
-          clearInterval(timer)
-          signal?.removeEventListener('abort', onAbort)
-          reject(new Error(`FFmpeg 启动失败: ${e.message}`)) 
+          finish(new Error(`FFmpeg 启动失败: ${e.message}`))
         })
       })
     }
 
     return run([]).catch(err => {
-      if (err instanceof Error && err.message.includes('tag for codec hevc')) {
+      if (!signal?.aborted && err instanceof Error && err.message.includes('tag for codec hevc')) {
         return run(['-tag:v', 'hvc1'])
       }
       throw err
@@ -628,14 +826,23 @@ export class ClipService {
   ): Promise<void> {
     const ffmpegBin = ffmpegResolved || 'ffmpeg'
     return new Promise((resolve, reject) => {
-      if (signal?.aborted) return reject(new Error('aborted'))
+      if (signal?.aborted) return reject(abortError())
       console.log(`[ffmpeg] ${args.slice(0, 6).join(' ')} ...`)
       const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
       let stderr = ''
       let buf = ''
       let lastUpdate = 0
+      let settled = false
+      const finish = (error?: Error) => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        if (error) reject(error)
+        else resolve()
+      }
 
       proc.stdout.on('data', (chunk: Buffer) => {
+        if (signal?.aborted || settled) return
         buf += chunk.toString()
         const lines = buf.split('\n')
         buf = lines.pop() || ''
@@ -658,21 +865,22 @@ export class ClipService {
 
       const onAbort = () => {
         proc.kill('SIGTERM')
-        reject(new Error('aborted'))
       }
       signal?.addEventListener('abort', onAbort, { once: true })
 
       proc.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
       proc.on('close', (code) => {
-        signal?.removeEventListener('abort', onAbort)
+        if (signal?.aborted) {
+          finish(abortError())
+          return
+        }
         if (code !== 0) {
           console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-          reject(new Error(`FFmpeg 编码失败 (code ${code}): ${stderr.slice(-300)}`))
-        } else resolve()
+          finish(new Error(`FFmpeg 编码失败 (code ${code}): ${stderr.slice(-300)}`))
+        } else finish()
       })
       proc.on('error', (e) => {
-        signal?.removeEventListener('abort', onAbort)
-        reject(new Error(`FFmpeg 启动失败: ${e.message}`))
+        finish(new Error(`FFmpeg 启动失败: ${e.message}`))
       })
     })
   }

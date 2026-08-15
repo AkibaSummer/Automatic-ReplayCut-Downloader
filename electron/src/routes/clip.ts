@@ -3,32 +3,89 @@ import path from 'node:path'
 import type { DesktopBackend } from '../backend'
 import type { Request, Response } from 'express'
 import { resolveAppPathWithBase } from '../config'
-import { ensureDir } from '../utils'
+import { fetchImageResource, ImageProxyError } from './bilibili'
+
+const BILIBILI_MEDIA_HOSTS = ['hdslb.com', 'bilibili.com', 'bilivideo.com', 'biliimg.com', 'akamaized.net']
+
+function validateBilibiliMediaUrl(rawUrl: string) {
+  const parsed = new URL(rawUrl)
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('URL protocol not allowed')
+  }
+  if (!BILIBILI_MEDIA_HOSTS.some(domain => parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`))) {
+    throw new Error('Domain not allowed')
+  }
+  return parsed.toString()
+}
+
+async function fetchValidatedBilibiliMedia(
+  backend: DesktopBackend,
+  rawUrl: string,
+  signal?: AbortSignal,
+) {
+  let currentUrl = validateBilibiliMediaUrl(rawUrl)
+  for (let redirects = 0; redirects <= 3; redirects += 1) {
+    const response = await backend.bilibiliClient.fetchWithCookies(currentUrl, {
+      redirect: 'manual',
+      signal,
+    })
+    if (response.status < 300 || response.status >= 400) {
+      return { url: currentUrl, response }
+    }
+    const location = response.headers.get('location')
+    await response.body?.cancel().catch(() => undefined)
+    if (!location) throw new Error('Media redirect is missing a location')
+    if (redirects === 3) throw new Error('Too many media redirects')
+    currentUrl = validateBilibiliMediaUrl(new URL(location, currentUrl).toString())
+  }
+  throw new Error('Too many media redirects')
+}
+
+async function spawnSystemOpener(target: string, selectFile = false) {
+  const { spawn } = await import('node:child_process')
+  const command = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open'
+  const args = process.platform === 'win32' && selectFile ? [`/select,${target}`] : [target]
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true })
+    child.once('error', reject)
+    child.once('spawn', () => {
+      child.unref()
+      resolve()
+    })
+  })
+}
 
 export function registerClipRoutes(backend: DesktopBackend) {
   // Cover image proxy — fetches external B站 cover images to avoid mixed-content blocks
   backend.app.get('/api/clip/cover-proxy', async (req: Request, res: Response) => {
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    req.once('aborted', abort)
+    res.once('close', abort)
     try {
       const url = req.query.url as string
-      if (!url) throw new Error('Missing cover URL')
-      // Validate URL domain to prevent SSRF
-      try {
-        const parsed = new URL(url)
-        const allowed = ['hdslb.com', 'bilibili.com', 'bilivideo.com', 'biliimg.com', 'akamaized.net']
-        if (!allowed.some(d => parsed.hostname === d || parsed.hostname.endsWith('.' + d))) {
-          res.status(400).json({ error: 'Domain not allowed' })
-          return
-        }
-      } catch { res.status(400).json({ error: 'Invalid URL' }); return }
-      const response = await fetch(url, { headers: { 'Referer': 'https://www.bilibili.com/' } })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const contentType = response.headers.get('content-type') || 'image/jpeg'
-      res.setHeader('content-type', contentType)
+      if (!url) {
+        res.status(400).json({ error: 'Missing cover URL' })
+        return
+      }
+      const image = await fetchImageResource(url, BILIBILI_MEDIA_HOSTS, globalThis.fetch, controller.signal)
+      res.status(image.status)
+      res.setHeader('content-type', image.contentType)
       res.setHeader('cache-control', 'public, max-age=86400')
-      const buffer = Buffer.from(await response.arrayBuffer())
-      res.send(buffer)
+      res.send(image.body)
     } catch (error) {
-      backend.sendError(res, error)
+      if (!res.headersSent) {
+        if (error instanceof ImageProxyError) {
+          res.status(error.status).json({ error: error.message })
+        } else if (controller.signal.aborted) {
+          res.status(499).end()
+        } else {
+          backend.sendError(res, error)
+        }
+      }
+    } finally {
+      req.off('aborted', abort)
+      res.off('close', abort)
     }
   })
 
@@ -38,15 +95,21 @@ export function registerClipRoutes(backend: DesktopBackend) {
     res.json({ path: clipDir })
   })
 
-  backend.app.post('/api/clip/output-dir', (req: Request, res: Response) => {
+  backend.app.post('/api/clip/output-dir', async (req: Request, res: Response) => {
+    let mutation: ReturnType<DesktopBackend['beginMutation']> | undefined
     try {
+      mutation = backend.beginMutation()
       const newDir = req.body.path as string
       if (!newDir) throw new Error('Missing path')
-      backend.config.download.clip_output_dir = newDir
-      ensureDir(resolveAppPathWithBase(backend.baseDir, newDir))
-      res.json({ ok: true, path: resolveAppPathWithBase(backend.baseDir, newDir) })
+      const resolvedDir = resolveAppPathWithBase(backend.baseDir, newDir)
+      const canonical = await backend.updateConfig(draft => {
+        draft.download.clip_output_dir = resolvedDir
+      })
+      res.json({ ok: true, path: canonical.download.clip_output_dir, config: canonical })
     } catch (error) {
       backend.sendError(res, error)
+    } finally {
+      mutation?.finish()
     }
   })
 
@@ -63,13 +126,37 @@ export function registerClipRoutes(backend: DesktopBackend) {
   })
 
   backend.app.get('/api/clip/audio-proxy', async (req: Request, res: Response) => {
+    const controller = new AbortController()
+    const stopRequest = () => controller.abort()
+    req.once('aborted', stopRequest)
+    res.once('close', () => {
+      if (!res.writableEnded) stopRequest()
+    })
     try {
       const url = req.query.url as string
-      const start = Number(req.query.start) || 0
-      const duration = Number(req.query.duration) || 0
+      const start = req.query.start === undefined ? 0 : Number(req.query.start)
+      const duration = req.query.duration === undefined ? 0 : Number(req.query.duration)
       if (!url) throw new Error('Missing audio URL')
+      if (!Number.isFinite(start) || start < 0 || !Number.isFinite(duration) || duration < 0) {
+        res.status(400).json({ error: 'start and duration must be finite non-negative numbers' })
+        return
+      }
+      let media: Awaited<ReturnType<typeof fetchValidatedBilibiliMedia>>
+      try {
+        media = await fetchValidatedBilibiliMedia(backend, url, controller.signal)
+      } catch (error) {
+        res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid URL' })
+        return
+      }
+      if (!media.response.ok) {
+        await media.response.body?.cancel().catch(() => undefined)
+        res.status(media.response.status).json({ error: `Upstream media request failed: HTTP ${media.response.status}` })
+        return
+      }
+      const validatedUrl = media.url
       
       if (duration > 0) {
+        await media.response.body?.cancel().catch(() => undefined)
         res.setHeader('content-type', 'audio/mpeg')
         // Use child_process.spawn directly because fluent-ffmpeg doesn't properly quote -headers
         const cookie = backend.bilibiliClient.cookieHeader()
@@ -79,7 +166,7 @@ export function registerClipRoutes(backend: DesktopBackend) {
         const args = [
           '-ss', `${start}`,
           '-headers', headers,
-          '-i', url,
+          '-i', validatedUrl,
           '-t', `${duration}`,
           '-f', 'mp3',
           '-c:a', 'libmp3lame',
@@ -99,20 +186,26 @@ export function registerClipRoutes(backend: DesktopBackend) {
           console.error('[audio-proxy] spawn error:', err)
           if (!res.headersSent) res.status(500).json({ error: err.message })
         })
+        const stopProxyProcess = () => {
+          if (proc.exitCode === null) proc.kill()
+        }
         proc.on('close', (code: number | null) => {
+          req.off('aborted', stopProxyProcess)
           if (code !== 0 && code !== null) console.error('[audio-proxy] ffmpeg exited with code', code)
-          res.end()
+          if (!res.writableEnded) res.end()
         })
-        req.on('close', () => {
-          proc.kill()
+        req.once('aborted', stopProxyProcess)
+        res.once('close', () => {
+          if (!res.writableEnded) stopProxyProcess()
         })
         return
       }
 
       // For non-duration requests, stream directly via authenticated fetch
-      const response = await backend.bilibiliClient.fetchWithCookies(url)
+      const response = media.response
       res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
-      res.setHeader('content-length', response.headers.get('content-length') || '')
+      const contentLength = response.headers.get('content-length')
+      if (contentLength) res.setHeader('content-length', contentLength)
       res.setHeader('accept-ranges', 'bytes')
       if (response.body) {
         const { Readable } = require('node:stream')
@@ -122,17 +215,27 @@ export function registerClipRoutes(backend: DesktopBackend) {
         res.send(buffer)
       }
     } catch (error) {
-      backend.sendError(res, error)
+      if (!res.headersSent && !controller.signal.aborted) backend.sendError(res, error)
+    } finally {
+      req.off('aborted', stopRequest)
     }
   })
 
   backend.app.get('/api/clip/tasks', (req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store')
+    for (const taskId of backend.db.healMissingClipFiles(backend.baseDir)) {
+      backend.emitClipTaskUpdate(taskId)
+    }
     res.json(backend.db.getClipTasks())
   })
 
   backend.app.post('/api/clip/execute', async (req: Request, res: Response) => {
     try {
-      const { url, title, startTime, endTime, audioQualityIndex, videoQualityIndex, prefixCut, suffixTime, clipMode } = req.body
+      const {
+        url, title, startTime, endTime, audioQualityIndex, videoQualityIndex,
+        audioQualityId, audioQualityCodec, videoQualityId, videoQualityCodec,
+        prefixCut, suffixTime, clipMode,
+      } = req.body
       const taskId = backend.db.createClipTask({
         url,
         title: title || 'Clip',
@@ -140,32 +243,50 @@ export function registerClipRoutes(backend: DesktopBackend) {
         end_time: Number(endTime) || 0
       })
 
-      res.json({ taskId, status: 'pending' })
-
-      const controller = new AbortController()
-      backend.clipTasksAbort.set(taskId, controller)
-
-      // Execute in background
-      backend.clipService.executeClip(
-        url, title, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
-        (progress, message) => {
-          backend.db.updateClipTask(taskId, { progress, status: 'processing', message: message || '' })
+      backend.emitClipTaskUpdate(taskId)
+      const queued = backend.enqueueClipTask(taskId, async controller => {
+        try {
+          const result = await backend.clipService.executeClip(
+            url, title, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
+            (progress, message) => {
+              if (controller.signal.aborted || backend.clipTasksAbort.get(taskId) !== controller) return
+              backend.db.updateClipTask(taskId, { progress, status: 'processing', message: message || '' })
+              backend.emitClipTaskUpdate(taskId)
+            },
+            prefixCut !== false,
+            suffixTime !== false,
+            clipMode || 'copy',
+            controller.signal,
+            {
+              audioId: Number.isFinite(Number(audioQualityId)) ? Number(audioQualityId) : undefined,
+              audioCodec: audioQualityCodec ? String(audioQualityCodec) : undefined,
+              videoId: Number.isFinite(Number(videoQualityId)) ? Number(videoQualityId) : undefined,
+              videoCodec: videoQualityCodec ? String(videoQualityCodec) : undefined,
+            },
+          )
+          if (controller.signal.aborted || backend.clipTasksAbort.get(taskId) !== controller) return
+          const resultInfo = result as { path: string; message?: string }
+          backend.db.updateClipTask(taskId, {
+            progress: 100,
+            status: 'done',
+            file_path: resultInfo.path,
+            message: resultInfo.message || '',
+          })
           backend.emitClipTaskUpdate(taskId)
-        },
-        prefixCut !== false,
-        suffixTime !== false,
-        clipMode || 'copy',
-        controller.signal
-      ).then(result => {
-        backend.clipTasksAbort.delete(taskId)
-        const r = result as { path: string; message?: string }
-        backend.db.updateClipTask(taskId, { progress: 100, status: 'done', file_path: r.path, message: r.message || '' })
-        backend.emitClipTaskUpdate(taskId)
-      }).catch(error => {
-        backend.clipTasksAbort.delete(taskId)
-        backend.db.updateClipTask(taskId, { status: 'error', message: error.message })
-        backend.emitClipTaskUpdate(taskId)
+        } catch (error) {
+          if (controller.signal.aborted || backend.clipTasksAbort.get(taskId) !== controller) return
+          backend.db.updateClipTask(taskId, { status: 'error', message: error instanceof Error ? error.message : String(error) })
+          backend.emitClipTaskUpdate(taskId)
+        }
       })
+      if (!queued) {
+        backend.db.updateClipTask(taskId, { status: 'error', message: 'Backend is shutting down' })
+        backend.emitClipTaskUpdate(taskId)
+        res.status(503).json({ error: 'Backend is shutting down', taskId })
+        return
+      }
+      const currentTask = backend.db.getClipTasks().find(task => task.id === taskId)
+      res.json({ taskId, status: currentTask?.status || 'pending' })
 
     } catch (error) {
       backend.sendError(res, error)
@@ -174,10 +295,8 @@ export function registerClipRoutes(backend: DesktopBackend) {
 
   backend.app.post('/api/clip/cancel/:taskId', (req: Request, res: Response) => {
     const taskId = Number(req.params.taskId)
-    const controller = backend.clipTasksAbort.get(taskId)
-    if (controller) {
-      controller.abort()
-      res.json({ ok: true })
+    if (backend.cancelClipTask(taskId)) {
+      res.json({ ok: true, status: 'error', message: 'Cancelled' })
     } else {
       res.status(404).json({ error: 'Task not found or already finished' })
     }
@@ -193,10 +312,10 @@ export function registerClipRoutes(backend: DesktopBackend) {
       }
       try {
         const { shell } = require('electron')
-        await shell.openPath(filePath)
+        const errorMessage = await shell.openPath(filePath)
+        if (errorMessage) throw new Error(errorMessage)
       } catch {
-        const { exec } = await import('node:child_process')
-        exec(`start "" "${filePath.replace(/"/g, '')}"`)  
+        await spawnSystemOpener(filePath)
       }
       res.json({ ok: true })
     } catch (error) {
@@ -218,15 +337,23 @@ export function registerClipRoutes(backend: DesktopBackend) {
           shell.showItemInFolder(filePath)
         } else {
           const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
-          await shell.openPath(dir)
+          if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+            res.status(404).json({ ok: false, message: 'Folder not found' })
+            return
+          }
+          const errorMessage = await shell.openPath(dir)
+          if (errorMessage) throw new Error(errorMessage)
         }
       } catch {
         const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
-        const { exec } = await import('node:child_process')
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          exec(`explorer /select,"${filePath.replace(/"/g, '')}"`)  
+          await spawnSystemOpener(filePath, true)
         } else {
-          exec(`explorer "${dir.replace(/"/g, '')}"`)  
+          if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
+            res.status(404).json({ ok: false, message: 'Folder not found' })
+            return
+          }
+          await spawnSystemOpener(dir)
         }
       }
       res.json({ ok: true })

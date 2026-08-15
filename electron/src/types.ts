@@ -53,6 +53,32 @@ export type ReplayRecord = {
   streams: StreamSlice[]
 }
 
+export type ReplayPatch = Partial<
+  Pick<
+    ReplayRecord,
+    | 'status'
+    | 'message'
+    | 'progress'
+    | 'speed'
+    | 'elapsed'
+    | 'eta'
+    | 'file_path'
+    | 'file_size'
+    | 'resolution'
+    | 'bitrate'
+    | 'verify_ok'
+    | 'actual_duration'
+    | 'replay_id'
+    | 'room_id'
+    | 'title'
+    | 'start_time'
+    | 'end_time'
+    | 'duration'
+    | 'cover_url'
+    | 'local_cover'
+  >
+>
+
 export type StreamSlice = {
   id: number
   replay_id: number
@@ -84,6 +110,7 @@ export type ScanSummary = {
 
 export type ProgressUpdate = {
   live_key: string
+  updated_at: string
   progress: number
   merge_progress: number
   status: string
@@ -97,6 +124,7 @@ export type ProgressUpdate = {
 export type TaskHandle = {
   controller: AbortController
   promise: Promise<void>
+  generation: number
 }
 
 export type FileInfo = {
