@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location -LiteralPath $RepoRoot
 
-$Package = Get-Content -LiteralPath (Join-Path $RepoRoot 'package.json') -Raw | ConvertFrom-Json
+$Package = Get-Content -LiteralPath (Join-Path $RepoRoot 'package.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $Version = [string]$Package.version
 $ProductName = [string]$Package.build.productName
 $ReleaseRoot = [IO.Path]::GetFullPath((Join-Path $RepoRoot 'release'))

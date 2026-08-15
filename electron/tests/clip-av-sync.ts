@@ -10,6 +10,14 @@ import { ClipService } from '../src/clip'
 
 const ffmpeg = ffmpegPath?.replace('app.asar', 'app.asar.unpacked') || 'ffmpeg'
 
+// The fixture server is loopback-only. CI/developer proxy variables must not
+// send FFmpeg's 127.0.0.1 range requests through an external HTTP proxy.
+for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy']) {
+  delete process.env[key]
+}
+process.env.NO_PROXY = '127.0.0.1,localhost'
+process.env.no_proxy = '127.0.0.1,localhost'
+
 function run(args: string[]) {
   const result = spawnSync(ffmpeg, args, {
     maxBuffer: 64 * 1024 * 1024,
