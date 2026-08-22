@@ -70,6 +70,7 @@ interface AppState {
   clipTasks: ClipTaskRecord[]
   setClipTasks: (tasks: ClipTaskRecord[]) => void
   mergeClipTasks: (tasks: ClipTaskRecord[]) => void
+  reconcileClipTaskSnapshot: (tasks: ClipTaskRecord[], requestStartedAt: number) => void
   upsertClipTask: (task: ClipTaskRecord) => void
   runtimeState: Runtime | null
   setRuntimeState: (state: Runtime | null) => void
@@ -162,6 +163,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   mergeClipTasks: (tasks) => set((state) => ({
     clipTasks: mergeClipTaskRecords(state.clipTasks, tasks)
   })),
+  reconcileClipTaskSnapshot: (tasks, requestStartedAt) => set((state) => ({
+    clipTasks: reconcileClipTaskSnapshot(state.clipTasks, tasks, requestStartedAt)
+  })),
   upsertClipTask: (task) => set((state) => ({
     clipTasks: mergeClipTaskRecords(state.clipTasks, [task])
   })),
@@ -235,6 +239,46 @@ function mergeClipTaskRecords(current: ClipTaskRecord[], incoming: ClipTaskRecor
     if (!existing || shouldReplaceClipTask(existing, task)) byId.set(task.id, task)
   }
   return [...byId.values()].sort((left, right) => {
+    const leftCreated = Date.parse(left.created_at)
+    const rightCreated = Date.parse(right.created_at)
+    if (Number.isFinite(leftCreated) && Number.isFinite(rightCreated) && leftCreated !== rightCreated) {
+      return rightCreated - leftCreated
+    }
+    return right.id - left.id
+  })
+}
+
+/**
+ * Reconcile a complete server snapshot while preserving tasks that may have
+ * been created after the request started. On equal timestamps the canonical
+ * snapshot wins; millisecond timestamp collisions must not preserve a stale UI
+ * terminal state (for example `done` after the server healed it to `error`).
+ */
+export function reconcileClipTaskSnapshot(
+  current: ClipTaskRecord[],
+  incoming: ClipTaskRecord[],
+  requestStartedAt: number,
+) {
+  const currentById = new Map(current.map(task => [task.id, task]))
+  const incomingIds = new Set(incoming.map(task => task.id))
+  const reconciled = incoming.map(task => {
+    const existing = currentById.get(task.id)
+    if (!existing) return task
+    const existingUpdated = Date.parse(existing.updated_at)
+    const incomingUpdated = Date.parse(task.updated_at)
+    if (Number.isFinite(existingUpdated) && Number.isFinite(incomingUpdated) && existingUpdated > incomingUpdated) {
+      return existing
+    }
+    return task
+  })
+
+  for (const task of current) {
+    if (incomingIds.has(task.id)) continue
+    const createdAt = Date.parse(task.created_at)
+    if (!Number.isFinite(createdAt) || createdAt >= requestStartedAt) reconciled.push(task)
+  }
+
+  return reconciled.sort((left, right) => {
     const leftCreated = Date.parse(left.created_at)
     const rightCreated = Date.parse(right.created_at)
     if (Number.isFinite(leftCreated) && Number.isFinite(rightCreated) && leftCreated !== rightCreated) {

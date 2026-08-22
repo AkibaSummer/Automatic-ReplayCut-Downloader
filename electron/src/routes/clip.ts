@@ -3,43 +3,11 @@ import path from 'node:path'
 import type { DesktopBackend } from '../backend'
 import type { Request, Response } from 'express'
 import { resolveAppPathWithBase } from '../config'
+import { isUsableClipOutput } from '../db'
 import { fetchImageResource, ImageProxyError } from './bilibili'
+import { registerAudioProxyRoutes } from './audioProxy'
 
 const BILIBILI_MEDIA_HOSTS = ['hdslb.com', 'bilibili.com', 'bilivideo.com', 'biliimg.com', 'akamaized.net']
-
-function validateBilibiliMediaUrl(rawUrl: string) {
-  const parsed = new URL(rawUrl)
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error('URL protocol not allowed')
-  }
-  if (!BILIBILI_MEDIA_HOSTS.some(domain => parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`))) {
-    throw new Error('Domain not allowed')
-  }
-  return parsed.toString()
-}
-
-async function fetchValidatedBilibiliMedia(
-  backend: DesktopBackend,
-  rawUrl: string,
-  signal?: AbortSignal,
-) {
-  let currentUrl = validateBilibiliMediaUrl(rawUrl)
-  for (let redirects = 0; redirects <= 3; redirects += 1) {
-    const response = await backend.bilibiliClient.fetchWithCookies(currentUrl, {
-      redirect: 'manual',
-      signal,
-    })
-    if (response.status < 300 || response.status >= 400) {
-      return { url: currentUrl, response }
-    }
-    const location = response.headers.get('location')
-    await response.body?.cancel().catch(() => undefined)
-    if (!location) throw new Error('Media redirect is missing a location')
-    if (redirects === 3) throw new Error('Too many media redirects')
-    currentUrl = validateBilibiliMediaUrl(new URL(location, currentUrl).toString())
-  }
-  throw new Error('Too many media redirects')
-}
 
 async function spawnSystemOpener(target: string, selectFile = false) {
   const { spawn } = await import('node:child_process')
@@ -56,6 +24,8 @@ async function spawnSystemOpener(target: string, selectFile = false) {
 }
 
 export function registerClipRoutes(backend: DesktopBackend) {
+  registerAudioProxyRoutes(backend)
+
   // Cover image proxy — fetches external B站 cover images to avoid mixed-content blocks
   backend.app.get('/api/clip/cover-proxy', async (req: Request, res: Response) => {
     const controller = new AbortController()
@@ -125,102 +95,6 @@ export function registerClipRoutes(backend: DesktopBackend) {
     }
   })
 
-  backend.app.get('/api/clip/audio-proxy', async (req: Request, res: Response) => {
-    const controller = new AbortController()
-    const stopRequest = () => controller.abort()
-    req.once('aborted', stopRequest)
-    res.once('close', () => {
-      if (!res.writableEnded) stopRequest()
-    })
-    try {
-      const url = req.query.url as string
-      const start = req.query.start === undefined ? 0 : Number(req.query.start)
-      const duration = req.query.duration === undefined ? 0 : Number(req.query.duration)
-      if (!url) throw new Error('Missing audio URL')
-      if (!Number.isFinite(start) || start < 0 || !Number.isFinite(duration) || duration < 0) {
-        res.status(400).json({ error: 'start and duration must be finite non-negative numbers' })
-        return
-      }
-      let media: Awaited<ReturnType<typeof fetchValidatedBilibiliMedia>>
-      try {
-        media = await fetchValidatedBilibiliMedia(backend, url, controller.signal)
-      } catch (error) {
-        res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid URL' })
-        return
-      }
-      if (!media.response.ok) {
-        await media.response.body?.cancel().catch(() => undefined)
-        res.status(media.response.status).json({ error: `Upstream media request failed: HTTP ${media.response.status}` })
-        return
-      }
-      const validatedUrl = media.url
-      
-      if (duration > 0) {
-        await media.response.body?.cancel().catch(() => undefined)
-        res.setHeader('content-type', 'audio/mpeg')
-        // Use child_process.spawn directly because fluent-ffmpeg doesn't properly quote -headers
-        const cookie = backend.bilibiliClient.cookieHeader()
-        const headers = `Referer: https://www.bilibili.com/\\r\\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\\r\\nCookie: ${cookie}\\r\\n`
-        const ffmpegPath = (require('ffmpeg-static') || '').replace('app.asar', 'app.asar.unpacked')
-        const { spawn } = require('node:child_process')
-        const args = [
-          '-ss', `${start}`,
-          '-headers', headers,
-          '-i', validatedUrl,
-          '-t', `${duration}`,
-          '-f', 'mp3',
-          '-c:a', 'libmp3lame',
-          '-b:a', '32k',
-          '-ar', '8000',
-          '-ac', '1',
-          'pipe:1'
-        ]
-        console.log('[audio-proxy] spawning ffmpeg')
-        const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-        proc.stdout.pipe(res)
-        proc.stderr.on('data', (d: Buffer) => {
-          const msg = d.toString()
-          if (msg.includes('Error') || msg.includes('error')) console.error('[audio-proxy] ffmpeg stderr:', msg)
-        })
-        proc.on('error', (err: Error) => {
-          console.error('[audio-proxy] spawn error:', err)
-          if (!res.headersSent) res.status(500).json({ error: err.message })
-        })
-        const stopProxyProcess = () => {
-          if (proc.exitCode === null) proc.kill()
-        }
-        proc.on('close', (code: number | null) => {
-          req.off('aborted', stopProxyProcess)
-          if (code !== 0 && code !== null) console.error('[audio-proxy] ffmpeg exited with code', code)
-          if (!res.writableEnded) res.end()
-        })
-        req.once('aborted', stopProxyProcess)
-        res.once('close', () => {
-          if (!res.writableEnded) stopProxyProcess()
-        })
-        return
-      }
-
-      // For non-duration requests, stream directly via authenticated fetch
-      const response = media.response
-      res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
-      const contentLength = response.headers.get('content-length')
-      if (contentLength) res.setHeader('content-length', contentLength)
-      res.setHeader('accept-ranges', 'bytes')
-      if (response.body) {
-        const { Readable } = require('node:stream')
-        Readable.fromWeb(response.body).pipe(res)
-      } else {
-        const buffer = Buffer.from(await response.arrayBuffer())
-        res.send(buffer)
-      }
-    } catch (error) {
-      if (!res.headersSent && !controller.signal.aborted) backend.sendError(res, error)
-    } finally {
-      req.off('aborted', stopRequest)
-    }
-  })
-
   backend.app.get('/api/clip/tasks', (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store')
     for (const taskId of backend.db.healMissingClipFiles(backend.baseDir)) {
@@ -266,6 +140,9 @@ export function registerClipRoutes(backend: DesktopBackend) {
           )
           if (controller.signal.aborted || backend.clipTasksAbort.get(taskId) !== controller) return
           const resultInfo = result as { path: string; message?: string }
+          if (!isUsableClipOutput(resultInfo.path, backend.baseDir)) {
+            throw new Error('Clip output file is missing or empty')
+          }
           backend.db.updateClipTask(taskId, {
             progress: 100,
             status: 'done',
@@ -296,7 +173,8 @@ export function registerClipRoutes(backend: DesktopBackend) {
   backend.app.post('/api/clip/cancel/:taskId', (req: Request, res: Response) => {
     const taskId = Number(req.params.taskId)
     if (backend.cancelClipTask(taskId)) {
-      res.json({ ok: true, status: 'error', message: 'Cancelled' })
+      const task = backend.db.getClipTasks().find(candidate => candidate.id === taskId)
+      res.json({ ok: true, status: task?.status || 'error', message: task?.message || 'Cancelled', task })
     } else {
       res.status(404).json({ error: 'Task not found or already finished' })
     }

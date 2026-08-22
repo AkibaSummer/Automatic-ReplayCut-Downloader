@@ -77,6 +77,13 @@
     "confirm": "Confirm",
     "cancel": "Cancel"
   },
+  "waveform": {
+    "segmentFailed": "Waveform segment {{time}} failed: {{error}}",
+    "retry": "Retry",
+    "retrying": "Refreshing URL…",
+    "refreshFailed": "Unable to refresh the audio URL: {{error}}",
+    "previewLimited": "previewing the first {{seconds}}s"
+  },
   "dashboard": {
     "downloadsTitle": "Downloads",
     "downloadsDesc": "Manage downloads, pause and resume",

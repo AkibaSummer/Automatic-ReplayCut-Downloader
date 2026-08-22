@@ -45,6 +45,32 @@ async function main() {
   try {
     const service = new ClipService(configFor(baseDir), clientStub() as never, baseDir) as any
 
+    const validOutput = path.join(baseDir, 'valid-output.mp4')
+    await service.runFfmpegCommand([
+      '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=30:duration=2',
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:sample_rate=48000:duration=2',
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+      '-y', validOutput,
+    ])
+    await service.verifyClipOutput(validOutput, 2, 'reencode')
+    await assert.rejects(
+      service.verifyClipOutput(validOutput, 30, 'reencode'),
+      /output verification failed: expected 30\.0s/,
+      'a decodable but severely truncated clip must not be published as done',
+    )
+    const invalidOutput = path.join(baseDir, 'invalid-output.mp4')
+    fs.writeFileSync(invalidOutput, Buffer.alloc(1024, 1))
+    await assert.rejects(
+      service.verifyClipOutput(invalidOutput, 2, 'reencode'),
+      /output verification failed/i,
+      'a non-empty but undecodable file must not be published as done',
+    )
+
+    // The remaining lifecycle cases use lightweight fake MP4 bytes and focus
+    // on reservation/cleanup. Output verification itself is covered above.
+    service.verifyClipOutput = async () => {}
+
     assert.equal(service.resolveClipMode('smart', 'avc1.640032'), 'smart')
     assert.equal(service.resolveClipMode('smart', 'h264'), 'smart')
     assert.equal(service.resolveClipMode('smart', 'hev1.1.6.L150.90'), 'reencode')
@@ -73,6 +99,7 @@ async function main() {
       cookieHeader: () => '',
     }
     const qualityService = new ClipService(configFor(baseDir), qualityClient as never, baseDir) as any
+    qualityService.verifyClipOutput = async () => {}
     qualityService.localCopyCut = async (...args: unknown[]) => {
       selectedUrls.push(String(args[0]), String(args[1]))
       fs.writeFileSync(String(args[5]), Buffer.alloc(512, 5))
@@ -106,6 +133,7 @@ async function main() {
       }),
     }
     const fallbackService = new ClipService(configFor(baseDir), hevcClient as never, baseDir) as any
+    fallbackService.verifyClipOutput = async () => {}
     fallbackService.localSmartCut = async () => { throw new Error('HEVC must not enter Smart Cut') }
     fallbackService.localReencode = async (...args: unknown[]) => {
       fs.writeFileSync(String(args[5]), Buffer.alloc(512, 4))

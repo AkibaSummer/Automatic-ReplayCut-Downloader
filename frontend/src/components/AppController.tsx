@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store'
 import { useShallow } from 'zustand/react/shallow'
 import { getErrorMessage, isBackendReachableError, mergeRealtimeProgress, shouldUseRealtimeProgress } from '../utils'
+import { RealtimeHeartbeat, startClipTaskPolling } from '../utils/taskStateSync'
 import type { Replay, DiskStats, Runtime, ClipTaskRecord } from '../types'
 
 export function AppController() {
@@ -13,8 +14,8 @@ export function AppController() {
     setReplays, patchReplay, setProgressMap,
     setDiskStats, setDiskStatsLoading,
     setRuntimeState, setPaused,
-    mergeClipTasks, upsertClipTask,
-    hasActiveReplay,
+    reconcileClipTaskSnapshot, upsertClipTask,
+    hasActiveReplay, showTaskCenter,
     showToast
   } = useAppStore(useShallow(state => ({
 
@@ -30,8 +31,9 @@ export function AppController() {
     setDiskStatsLoading: state.setDiskStatsLoading,
     setRuntimeState: state.setRuntimeState,
     setPaused: state.setPaused,
-    mergeClipTasks: state.mergeClipTasks,
+    reconcileClipTaskSnapshot: state.reconcileClipTaskSnapshot,
     upsertClipTask: state.upsertClipTask,
+    showTaskCenter: state.showTaskCenter,
     hasActiveReplay:
       state.replays.some(replay => ['pending', 'downloading', 'merging'].includes(replay.status)) ||
       Object.values(state.progressMap).some(progress => ['pending', 'downloading', 'merging'].includes(progress.status)),
@@ -89,44 +91,92 @@ export function AppController() {
     }
   }, [apiClient, setReplays, setProgressMap, setBackendOnline])
 
+  const fetchClipTasks = useCallback(async () => {
+    const requestStartedAt = Date.now()
+    try {
+      const res = await apiClient.get('/api/clip/tasks', { params: { _t: requestStartedAt } })
+      reconcileClipTaskSnapshot(res.data as ClipTaskRecord[], requestStartedAt)
+      setBackendOnline(true)
+    } catch (e) {
+      setBackendOnline(isBackendReachableError(e))
+    }
+  }, [apiClient, reconcileClipTaskSnapshot, setBackendOnline])
+
   // WebSocket
   useEffect(() => {
     if (!apiBase) return
-    let ws: WebSocket
-    let healthTimer: number
-    let reconnectTimer: number
+    let ws: WebSocket | undefined
+    let reconnectTimer: number | undefined
     let disposed = false
+    let connectionGeneration = 0
+    const healthTimers = new Set<number>()
+    const heartbeat = new RealtimeHeartbeat()
+
+    const scheduleReconnect = (generation: number) => {
+      if (disposed || generation !== connectionGeneration || reconnectTimer !== undefined) return
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = undefined
+        if (!disposed && generation === connectionGeneration) connect()
+      }, 3000)
+    }
 
     const connect = () => {
-      ws = new WebSocket(buildWsUrl('/ws'))
-      ws.onopen = () => {
+      const generation = ++connectionGeneration
+      const socket = new WebSocket(buildWsUrl('/ws'))
+      let socketHealthTimer: number | undefined
+      const stopSocketHealth = () => {
+        if (socketHealthTimer === undefined) return
+        window.clearInterval(socketHealthTimer)
+        healthTimers.delete(socketHealthTimer)
+        socketHealthTimer = undefined
+      }
+      ws = socket
+      socket.onopen = () => {
+        if (generation !== connectionGeneration) return
+        heartbeat.reset()
         setWsOnline(true)
         void fetchReplays()
-        apiClient.get('/api/clip/tasks', { params: { _t: Date.now() } })
-          .then(res => mergeClipTasks(res.data as ClipTaskRecord[]))
-          .catch(() => {})
-        healthTimer = window.setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping' }))
+        void fetchClipTasks()
+        socketHealthTimer = window.setInterval(() => {
+          if (socket.readyState === WebSocket.OPEN) {
+            heartbeat.pulse(
+              () => socket.send(JSON.stringify({ type: 'ping' })),
+              () => {
+                stopSocketHealth()
+                setWsOnline(false)
+                socket.close(4000, 'Heartbeat timeout')
+                scheduleReconnect(generation)
+              },
+            )
           }
         }, 15000)
+        healthTimers.add(socketHealthTimer)
       }
-      ws.onclose = () => {
+      socket.onclose = () => {
+        stopSocketHealth()
+        if (generation !== connectionGeneration) return
         setWsOnline(false)
-        window.clearInterval(healthTimer)
-        if (!disposed) reconnectTimer = window.setTimeout(connect, 3000)
+        scheduleReconnect(generation)
       }
-      ws.onerror = () => {
+      socket.onerror = () => {
+        stopSocketHealth()
+        if (generation !== connectionGeneration) return
         setWsOnline(false)
+        socket.close()
+        scheduleReconnect(generation)
       }
-      ws.onmessage = (e) => {
+      socket.onmessage = (e) => {
+        if (generation !== connectionGeneration) return
         let data: any
         try {
           data = JSON.parse(e.data)
         } catch {
           return
         }
-        if (data.type === 'pong') return
+        if (data.type === 'pong') {
+          heartbeat.acknowledge()
+          return
+        }
         if (data.type === 'clip_task_update') {
           const task = data.data as ClipTaskRecord | undefined
           if (!task || !Number.isFinite(task.id)) return
@@ -176,12 +226,14 @@ export function AppController() {
     connect()
     return () => {
       disposed = true
-      window.clearInterval(healthTimer)
+      connectionGeneration += 1
+      for (const timer of healthTimers) window.clearInterval(timer)
+      healthTimers.clear()
       window.clearTimeout(reconnectTimer)
       setWsOnline(false)
       if (ws) ws.close()
     }
-  }, [apiBase, apiClient, buildWsUrl, fetchReplays, mergeClipTasks, patchReplay, setProgressMap, setWsOnline, showToast, t, upsertClipTask])
+  }, [apiBase, buildWsUrl, fetchClipTasks, fetchReplays, patchReplay, setProgressMap, setWsOnline, showToast, t, upsertClipTask])
 
   const fetchDiskStats = useCallback(async () => {
     if (!apiBase || !useAppStore.getState().backendOnline) return
@@ -237,15 +289,6 @@ export function AppController() {
     }
   }, [apiClient, setBackendOnline])
 
-  const fetchClipTasks = useCallback(async () => {
-    try {
-      const res = await apiClient.get('/api/clip/tasks')
-      mergeClipTasks(res.data as ClipTaskRecord[])
-    } catch (e) {
-      setBackendOnline(isBackendReachableError(e))
-    }
-  }, [apiClient, mergeClipTasks, setBackendOnline])
-
   // Initial loads
   useEffect(() => {
     if (!apiBase) return
@@ -254,6 +297,25 @@ export function AppController() {
     void fetchMe()
     void fetchClipTasks()
   }, [apiBase, fetchClipTasks, fetchConfig, fetchMe, fetchReplays])
+
+  useEffect(() => {
+    if (!apiBase) return
+    return startClipTaskPolling({
+      refresh: fetchClipTasks,
+      getTasks: () => useAppStore.getState().clipTasks,
+    })
+  }, [apiBase, fetchClipTasks])
+
+  useEffect(() => {
+    if (apiBase && showTaskCenter) void fetchClipTasks()
+  }, [apiBase, fetchClipTasks, showTaskCenter])
+
+  useEffect(() => {
+    if (!apiBase) return
+    const refreshOnFocus = () => { void fetchClipTasks() }
+    window.addEventListener('focus', refreshOnFocus)
+    return () => window.removeEventListener('focus', refreshOnFocus)
+  }, [apiBase, fetchClipTasks])
 
   // Timers
   useEffect(() => {

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 
 import { WaveformRequestRegistry } from '../src/utils/waveformRequests'
+import {
+  initialWaveformViewport,
+  waveformRequestErrorMessage,
+} from '../src/utils/waveform'
 
 const registry = new WaveformRequestRegistry()
 const firstGeneration = registry.beginSession()
@@ -24,5 +28,19 @@ assert.equal(
 
 registry.finish(newRequest)
 assert.equal(registry.size, 0)
+
+assert.deepEqual(
+  initialWaveformViewport(3 * 60 * 60),
+  { zoomWindow: 120, scrollOffset: 60 },
+  'a long recording must load only the initial viewport instead of every chunk',
+)
+assert.deepEqual(initialWaveformViewport(45), { zoomWindow: 45, scrollOffset: 22.5 })
+
+const encodedError = new TextEncoder().encode(JSON.stringify({ error: 'upstream denied the segment' })).buffer
+assert.equal(
+  waveformRequestErrorMessage({ response: { status: 502, data: encodedError } }),
+  'upstream denied the segment',
+  'arraybuffer API errors must remain visible to the user',
+)
 
 console.log('waveform request registry: ok')

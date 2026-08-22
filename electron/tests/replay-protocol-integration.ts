@@ -126,6 +126,15 @@ async function main() {
       replay_id: 21, live_key: 'missing-file', title: 'missing', status: 'completed',
       file_path: 'relative-missing.mp4', file_size: 7,
     })
+    await writeFile(path.join(baseDir, 'empty-replay.mp4'), '')
+    backend.db.insertReplay({
+      replay_id: 22, live_key: 'empty-file', title: 'empty', status: 'completed',
+      file_path: 'empty-replay.mp4', file_size: 7,
+    })
+    backend.db.insertReplay({
+      replay_id: 23, live_key: 'empty-path', title: 'empty path', status: 'completed',
+      file_path: '', file_size: 7,
+    })
     ;(backend.bilibiliClient as any).fetchJSON = async () => ({
       code: 0,
       message: '',
@@ -154,7 +163,7 @@ async function main() {
       new_records: 0,
       updated_records: 1,
       covers_updated: 1,
-      marked_deleted: 1,
+      marked_deleted: 3,
       already_up_to_date: 0,
     })
     const metadata = backend.db.getReplayByLiveKey(baseDir, 'metadata')!
@@ -179,6 +188,8 @@ async function main() {
     })
     assert.equal(backend.db.getReplayByLiveKey(baseDir, 'relative-file')?.status, 'completed')
     assert.equal(backend.db.getReplayByLiveKey(baseDir, 'missing-file')?.status, 'deleted')
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'empty-file')?.status, 'deleted')
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'empty-path')?.status, 'deleted')
     const secondScan = await fetch(`${baseURL}/api/scan`, { method: 'POST' })
     assert.deepEqual(await secondScan.json(), {
       fetched: 1,

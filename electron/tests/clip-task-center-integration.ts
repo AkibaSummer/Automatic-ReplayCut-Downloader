@@ -111,14 +111,23 @@ async function main() {
     const cancelledUpdate = waitForClipTaskUpdate(ws, update => update.data.id === created.taskId && update.data.message === 'Cancelled')
     const cancelResponse = await fetch(`${baseURL}/api/clip/cancel/${created.taskId}`, { method: 'POST' })
     assert.equal(cancelResponse.status, 200)
-    assert.deepEqual(await cancelResponse.json(), { ok: true, status: 'error', message: 'Cancelled' })
+    const cancelPayload = await cancelResponse.json() as { ok: boolean; status: string; message: string; task?: { id: number; updated_at: string } }
+    assert.deepEqual(
+      { ok: cancelPayload.ok, status: cancelPayload.status, message: cancelPayload.message, taskId: cancelPayload.task?.id },
+      { ok: true, status: 'error', message: 'Cancelled', taskId: created.taskId },
+      'cancel must return the canonical task instead of requiring a fabricated client timestamp',
+    )
     assert.equal(executionSignal?.aborted, true)
     const cancelled = await cancelledUpdate
     assert.equal(cancelled.data.status, 'error')
     assert.equal(cancelled.data.progress, 42)
     const repeatedCancel = await fetch(`${baseURL}/api/clip/cancel/${created.taskId}`, { method: 'POST' })
     assert.equal(repeatedCancel.status, 200, 'repeating cancellation must be idempotent')
-    assert.deepEqual(await repeatedCancel.json(), { ok: true, status: 'error', message: 'Cancelled' })
+    const repeatedPayload = await repeatedCancel.json() as { ok: boolean; status: string; message: string; task?: { id: number } }
+    assert.deepEqual(
+      { ok: repeatedPayload.ok, status: repeatedPayload.status, message: repeatedPayload.message, taskId: repeatedPayload.task?.id },
+      { ok: true, status: 'error', message: 'Cancelled', taskId: created.taskId },
+    )
 
     // A progress callback and successful resolution racing after cancel must not
     // revive the task or attach an output path.
@@ -196,7 +205,7 @@ async function main() {
       progress: healedTask.progress,
       message: healedTask.message,
       file_path: healedTask.file_path,
-    }, { status: 'error', progress: 0, message: 'Output file is missing', file_path: '' })
+    }, { status: 'error', progress: 0, message: 'Output file is missing or empty', file_path: '' })
 
     console.log('clip task lifecycle and output-dir persistence integration test passed')
   } finally {

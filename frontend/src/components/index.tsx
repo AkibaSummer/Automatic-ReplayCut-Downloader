@@ -112,23 +112,53 @@ export function LoginModal({ apiClient, onClose, onSuccess }: { apiClient: Axios
 
   useEffect(() => {
     if (!key) return
-    const interval = setInterval(async () => {
+    let disposed = false
+    let pollTimer: number | undefined
+    let successTimer: number | undefined
+    let request: AbortController | null = null
+
+    const scheduleNext = () => {
+      if (!disposed) pollTimer = window.setTimeout(() => { void poll() }, 2000)
+    }
+    const poll = async () => {
+      request = new AbortController()
+      let terminal = false
       try {
-        const res = await apiClient.get(`/api/login/poll?qrcode_key=${key}`)
+        const res = await apiClient.get(`/api/login/poll?qrcode_key=${key}`, { signal: request.signal })
+        if (disposed) return
         const code = res.data.code
+        setErrorText('')
         if (code === 0) {
+          terminal = true
           setStatusText(t('common.loginSuccess'))
-          clearInterval(interval)
-          setTimeout(() => onSuccess(), 1000)
+          successTimer = window.setTimeout(() => {
+            if (!disposed) onSuccess()
+          }, 1000)
         } else if (code === 86090) {
           setStatusText(t('common.loginScanConfirm'))
         } else if (code === 86038) {
+          terminal = true
           setErrorText(t('common.loginExpired'))
-          clearInterval(interval)
         }
-      } catch (err: any) {}
-    }, 2000)
-    return () => clearInterval(interval)
+      } catch (err: any) {
+        if (disposed || err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return
+        // A failed poll means the current login state is unknown. Keeping the
+        // previous "waiting" text without surfacing the error made an offline
+        // backend look like a QR code that was still valid forever.
+        setErrorText(`${t('common.loginFailed')} ${getErrorMessage(err)}`)
+      } finally {
+        request = null
+        if (!terminal) scheduleNext()
+      }
+    }
+
+    scheduleNext()
+    return () => {
+      disposed = true
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer)
+      if (successTimer !== undefined) window.clearTimeout(successTimer)
+      request?.abort()
+    }
   }, [apiClient, key, onSuccess, t])
 
   return (

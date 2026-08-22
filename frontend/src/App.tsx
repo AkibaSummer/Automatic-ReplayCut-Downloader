@@ -10,7 +10,7 @@ import { ClipPage } from './ClipPage'
 import { SettingsPage } from './SettingsPage'
 import { useAppStore } from './store'
 import { useShallow } from 'zustand/react/shallow'
-import { getErrorMessage, isBackendReachableError } from './utils'
+import { getErrorMessage, isBackendReachableError, shouldUseRealtimeProgress } from './utils'
 import { quitDesktopApp, scanReplays } from './api/contracts'
 import { FileText, FolderOpen, X } from 'lucide-react'
 import { StatusPill } from './components/index'
@@ -48,6 +48,11 @@ function App() {
         const next = { ...prev }
         for (const liveKey of Object.keys(next)) {
           if (!liveKeys.has(liveKey)) delete next[liveKey]
+        }
+        for (const replay of list) {
+          if (!shouldUseRealtimeProgress(next[replay.live_key], replay)) {
+            delete next[replay.live_key]
+          }
         }
         return next
       })

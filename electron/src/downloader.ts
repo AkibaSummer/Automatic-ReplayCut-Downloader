@@ -64,14 +64,22 @@ export class DownloaderService {
 
       this.patchActiveReplay(liveKey, ['merging'], { message: 'Verifying duration...' }, signal, isCurrent)
       this.emitProgress({ live_key: liveKey, status: 'merging' })
-      let verifyOk = true
       let actualDuration = 0
       try {
         const verified = await this.verifyDuration(partPath, targetReplay.duration)
-        verifyOk = verified.ok
         actualDuration = verified.duration
-      } catch {
-        verifyOk = false
+        if (!verified.ok) {
+          throw new Error(
+            `Replay duration verification failed: expected ${targetReplay.duration}s, got ${actualDuration.toFixed(1)}s`,
+          )
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('Replay duration verification failed:')) {
+          throw error
+        }
+        throw new Error(
+          `Replay duration verification failed: ${error instanceof Error ? error.message : String(error)}`,
+        )
       }
       this.assertActive(signal, isCurrent)
 
@@ -105,8 +113,8 @@ export class DownloaderService {
         elapsed: targetReplay.elapsed,
         eta: '',
         status: 'completed',
-        message: verifyOk ? 'Success' : `Duration mismatch: expected ${targetReplay.duration}, got ${actualDuration.toFixed(1)}`,
-        verify_ok: verifyOk,
+        message: 'Success',
+        verify_ok: true,
         actual_duration: actualDuration,
       }, signal, isCurrent)
       committed = true
@@ -142,8 +150,16 @@ export class DownloaderService {
       let totalSegments = 0
       let expectedDuration = 0
       const allSegmentFiles: string[] = []
-      const streamDirs: string[] = []
+      const streamPlans: Array<{
+        streamIdx: number
+        segments: M3U8Segment[]
+        streamDir: string
+        segmentFiles: string[]
+      }> = []
 
+      // Resolve every playlist before downloading so progress always uses the
+      // final denominator. Discovering a later stream after an earlier one had
+      // reached 98% made the persisted/UI progress jump backwards.
       for (let streamIdx = 0; streamIdx < streams.length; streamIdx += 1) {
         this.assertActive(signal, isCurrent)
         const stream = streams[streamIdx]
@@ -153,14 +169,19 @@ export class DownloaderService {
         expectedDuration += segments.reduce((sum, item) => sum + item.duration, 0)
         const streamDir = path.join(this.config.download.temp_dir, `${replay.live_key}_stream${streamIdx}`)
         await fsp.mkdir(streamDir, { recursive: true })
-        streamDirs.push(streamDir)
+        const segmentFiles = segments.map((_segment, index) =>
+          path.join(streamDir, `seg_${String(index).padStart(5, '0')}.ts`),
+        )
+        allSegmentFiles.push(...segmentFiles)
+        streamPlans.push({ streamIdx, segments, streamDir, segmentFiles })
+      }
 
-        const streamSegmentOffset = allSegmentFiles.length
-        for (let i = 0; i < segments.length; i += 1) {
-          const segPath = path.join(streamDir, `seg_${String(i).padStart(5, '0')}.ts`)
-          allSegmentFiles.push(segPath)
-        }
+      if (totalSegments === 0) {
+        throw new Error(`No media segments found for replay ${replay.live_key}`)
+      }
 
+      for (const plan of streamPlans) {
+        const { streamIdx, segments, segmentFiles } = plan
         const limit = Math.max(1, Math.floor(this.config.download.concurrent_segments || 5))
         let currentIndex = 0
         let firstError: unknown = null
@@ -176,7 +197,7 @@ export class DownloaderService {
             if (i >= segments.length) return
 
             const seg = segments[i]
-            const segPath = allSegmentFiles[streamSegmentOffset + i]
+            const segPath = segmentFiles[i]
 
             try {
               if (!fs.existsSync(segPath) || fs.statSync(segPath).size === 0) {
@@ -233,8 +254,8 @@ export class DownloaderService {
       await this.runFfmpegMerge(replay.live_key, allSegmentFiles, partPath, expectedDuration, signal)
       this.assertActive(signal, isCurrent)
 
-      for (const dir of streamDirs) {
-        await fsp.rm(dir, { recursive: true, force: true })
+      for (const plan of streamPlans) {
+        await fsp.rm(plan.streamDir, { recursive: true, force: true })
       }
       this.assertActive(signal, isCurrent)
       return { finalPath, partPath }

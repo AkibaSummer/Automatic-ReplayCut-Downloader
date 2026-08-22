@@ -8,6 +8,7 @@ import { formatSeconds, sanitizeFilename, uniquePath, ensureDir } from './utils'
 import { resolveAppPathWithBase } from './config'
 import _ffmpegPath from 'ffmpeg-static'
 import ffmpeg from 'fluent-ffmpeg'
+import { parseFile } from 'music-metadata'
 
 function resolveFFmpegPath(): string | null {
   if (!_ffmpegPath) return null
@@ -130,6 +131,9 @@ export class ClipService {
       if (!fs.existsSync(partPath) || fs.statSync(partPath).size === 0) {
         throw new Error('Clip failed: output file is empty')
       }
+      onProgress?.(100, '校验切片输出...')
+      await this.verifyClipOutput(partPath, totalDuration, effectiveMode, signal)
+      throwIfAborted(signal)
       fs.renameSync(partPath, outPath)
       result.size = fs.statSync(outPath).size
     } catch (err) {
@@ -178,6 +182,51 @@ export class ClipService {
         const stem = desiredPath.slice(0, -ext.length)
         outPath = `${stem} (${suffix})${ext}`
       }
+    }
+  }
+
+  private async verifyClipOutput(
+    filePath: string,
+    expectedDuration: number,
+    mode: ClipMode,
+    signal?: AbortSignal,
+  ) {
+    throwIfAborted(signal)
+    const stat = await fs.promises.stat(filePath)
+    if (!stat.isFile() || stat.size === 0) {
+      throw new Error('Clip output verification failed: output is not a non-empty file')
+    }
+
+    let metadata: Awaited<ReturnType<typeof parseFile>>
+    try {
+      metadata = await parseFile(filePath)
+    } catch (error) {
+      throw new Error(
+        `Clip output verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    throwIfAborted(signal)
+
+    const tracks = metadata.format.trackInfo || []
+    const hasVideo = metadata.format.hasVideo === true || tracks.some(track => Boolean(track.video))
+    const hasAudio = metadata.format.hasAudio === true || tracks.some(track => Boolean(track.audio))
+    if (!hasVideo || !hasAudio) {
+      throw new Error(
+        `Clip output verification failed: missing ${!hasVideo && !hasAudio ? 'video and audio' : !hasVideo ? 'video' : 'audio'} stream`,
+      )
+    }
+
+    const actualDuration = Number(metadata.format.duration || 0)
+    if (!Number.isFinite(actualDuration) || actualDuration <= 0) {
+      throw new Error('Clip output verification failed: duration is unavailable')
+    }
+    const durationMargin = mode === 'copy'
+      ? Math.max(5, Math.min(15, expectedDuration * 0.02))
+      : Math.max(1, Math.min(5, expectedDuration * 0.02))
+    if (Math.abs(actualDuration - expectedDuration) > durationMargin) {
+      throw new Error(
+        `Clip output verification failed: expected ${expectedDuration.toFixed(1)}s, got ${actualDuration.toFixed(1)}s`,
+      )
     }
   }
 

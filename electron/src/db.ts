@@ -6,6 +6,21 @@ import { safeNumber, boolFromDb } from './utils'
 import { resolveAppPathWithBase } from './config'
 import path from 'node:path'
 
+export function isUsableClipOutput(filePath: string, baseDir = process.cwd()) {
+  if (!filePath) return false
+  const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(baseDir, filePath)
+  try {
+    const stats = fs.statSync(resolvedPath)
+    return stats.isFile() && stats.size > 0
+  } catch {
+    return false
+  }
+}
+
+export function isUsableReplayOutput(filePath: string, baseDir = process.cwd()) {
+  return isUsableClipOutput(filePath, baseDir)
+}
+
 function normalizeSqlParams(paramsRaw: unknown[]) {
   if (paramsRaw.length === 0) return undefined
   if (paramsRaw.length === 1) {
@@ -260,11 +275,11 @@ export class SqliteStore {
   }
 
   healDeletedReplays(baseDir = process.cwd()) {
-    const replays = this.prepare(`SELECT live_key, file_path FROM bilibili_replays WHERE status = 'completed' AND file_path != ''`).all() as {live_key: string, file_path: string}[]
+    const replays = this.prepare(`SELECT live_key, file_path FROM bilibili_replays WHERE status = 'completed'`).all() as {live_key: string, file_path: string}[]
     let count = 0
     for (const r of replays) {
       const resolvedPath = path.isAbsolute(r.file_path) ? r.file_path : path.resolve(baseDir, r.file_path)
-      if (r.file_path && !fs.existsSync(resolvedPath)) {
+      if (!isUsableReplayOutput(resolvedPath, baseDir)) {
         this.prepare(
           `UPDATE bilibili_replays
            SET status = 'deleted', file_path = '', file_size = 0, resolution = '', bitrate = '',
@@ -290,11 +305,17 @@ export class SqliteStore {
   }
 
   cleanupStaleClipTasks() {
-    return this.prepare(
-      `UPDATE clip_tasks
-       SET status = 'error', message = 'App closed during processing', updated_at = ?
-       WHERE status IN ('pending', 'processing')`
-    ).run(new Date().toISOString()).changes
+    const tasks = this.prepare(
+      `SELECT id FROM clip_tasks WHERE status IN ('pending', 'processing')`,
+    ).all() as Array<{ id: number }>
+    for (const task of tasks) {
+      this.updateClipTask(task.id, {
+        status: 'error',
+        message: 'App closed during processing',
+        file_path: '',
+      })
+    }
+    return tasks.length
   }
 
   healMissingClipFiles(baseDir = process.cwd()) {
@@ -304,16 +325,13 @@ export class SqliteStore {
     const healedIds: number[] = []
     for (const task of tasks) {
       const filePath = String(task.file_path || '')
-      const resolvedPath = filePath
-        ? (path.isAbsolute(filePath) ? filePath : path.resolve(baseDir, filePath))
-        : ''
-      if (resolvedPath && fs.existsSync(resolvedPath)) continue
-      this.prepare(
-        `UPDATE clip_tasks
-         SET status = 'error', progress = 0, file_path = '',
-             message = 'Output file is missing', updated_at = ?
-         WHERE id = ? AND status = 'done'`,
-      ).run(new Date().toISOString(), task.id)
+      if (isUsableClipOutput(filePath, baseDir)) continue
+      this.updateClipTask(task.id, {
+        status: 'error',
+        progress: 0,
+        file_path: '',
+        message: 'Output file is missing or empty',
+      })
       healedIds.push(task.id)
     }
     return healedIds
@@ -356,7 +374,7 @@ export class SqliteStore {
         filePath = resolveAppPathWithBase(baseDir, filePath)
       }
       let status = String(row.status || 'not_downloaded')
-      if (filePath && !fs.existsSync(filePath) && ['completed', 'deleted'].includes(status)) {
+      if (!isUsableReplayOutput(filePath, baseDir) && ['completed', 'deleted'].includes(status)) {
         filePath = ''
         status = 'deleted'
       }
@@ -418,7 +436,7 @@ export class SqliteStore {
       filePath = resolveAppPathWithBase(baseDir, filePath)
     }
     let status = String(row.status || 'not_downloaded')
-    if (filePath && !fs.existsSync(filePath) && ['completed', 'deleted'].includes(status)) {
+    if (!isUsableReplayOutput(filePath, baseDir) && ['completed', 'deleted'].includes(status)) {
       filePath = ''
       status = 'deleted'
     }
@@ -561,8 +579,14 @@ export class SqliteStore {
       params.push(v)
     }
     if (updates.length === 0) return
+    const current = this.prepare('SELECT updated_at FROM clip_tasks WHERE id = ?')
+      .get<{ updated_at: string }>(id)
+    const previousUpdatedAt = Date.parse(String(current?.updated_at || ''))
+    const nextUpdatedAt = Number.isFinite(previousUpdatedAt) && previousUpdatedAt >= Date.now()
+      ? previousUpdatedAt + 1
+      : Date.now()
     updates.push('updated_at = ?')
-    params.push(new Date().toISOString())
+    params.push(new Date(nextUpdatedAt).toISOString())
     params.push(id)
     
     this.prepare(`UPDATE clip_tasks SET ${updates.join(', ')} WHERE id = ?`).run(...params)

@@ -77,6 +77,13 @@
     "confirm": "确认",
     "cancel": "取消"
   },
+  "waveform": {
+    "segmentFailed": "波形分片 {{time}} 加载失败：{{error}}",
+    "retry": "重试",
+    "retrying": "刷新地址中…",
+    "refreshFailed": "刷新音频地址失败：{{error}}",
+    "previewLimited": "仅试听前 {{seconds}} 秒"
+  },
   "dashboard": {
     "downloadsTitle": "下载",
     "downloadsDesc": "管理录播下载、暂停与恢复",

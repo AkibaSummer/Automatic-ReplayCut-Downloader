@@ -232,6 +232,113 @@ async function testReplayOutputReservationAndMissingSegments() {
   }
 }
 
+async function testReplayAndClipShareGlobalConcurrencyLimit() {
+  const harness = await createHarness('shared-task-concurrency-')
+  try {
+    const { backend } = harness
+    insertReplay(backend, 'replay-blocker')
+
+    let markReplayStarted: (() => void) | undefined
+    const replayStarted = new Promise<void>(resolve => { markReplayStarted = resolve })
+    ;(backend.downloaderService as any).processReplayTask = (
+      _liveKey: string,
+      signal: AbortSignal,
+    ) => new Promise<void>((_resolve, reject) => {
+      markReplayStarted?.()
+      signal.addEventListener('abort', () => reject(abortError()), { once: true })
+    })
+
+    assert.equal(backend.enqueueReplay('replay-blocker'), true)
+    await withTimeout(replayStarted, 'replay concurrency blocker')
+
+    const clipTaskId = backend.db.createClipTask({
+      url: 'fixture', title: 'shared-budget-clip', start_time: 0, end_time: 1,
+    })
+    let markClipStarted: (() => void) | undefined
+    const clipStarted = new Promise<void>(resolve => { markClipStarted = resolve })
+    assert.equal(backend.enqueueClipTask(clipTaskId, async () => {
+      markClipStarted?.()
+      backend.db.updateClipTask(clipTaskId, { status: 'done', progress: 100 })
+    }), true)
+
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(
+      backend.clipTasksAbort.has(clipTaskId),
+      false,
+      'a clip must wait while a replay occupies the global concurrency slot',
+    )
+
+    const replayExecution = backend.activeTasks.get('replay-blocker')
+    assert.ok(replayExecution)
+    assert.equal(backend.pauseReplay('replay-blocker'), true)
+    await withTimeout(replayExecution!.promise, 'release replay concurrency slot')
+    await withTimeout(clipStarted, 'clip scheduled after replay slot release')
+    await new Promise(resolve => setImmediate(resolve))
+    assert.equal(backend.db.getClipTasks().find(task => task.id === clipTaskId)?.status, 'done')
+  } finally {
+    await destroyHarness(harness)
+  }
+}
+
+async function testMultiStreamProgressNeverRegresses() {
+  const harness = await createHarness('replay-multi-stream-progress-')
+  try {
+    const { backend, baseDir } = harness
+    insertReplay(backend, 'multi-stream', 'downloading')
+    const replay = backend.db.getReplayByLiveKey(baseDir, 'multi-stream')!
+    replay.streams = [
+      { id: 1, replay_id: replay.replay_id, start_time: 0, end_time: 20, stream: 'stream-1', type: 0, m3u8_text: '' },
+      { id: 2, replay_id: replay.replay_id, start_time: 20, end_time: 40, stream: 'stream-2', type: 0, m3u8_text: '' },
+    ]
+
+    const service = backend.downloaderService as any
+    const events: string[] = []
+    service.parseM3U8 = async (streamUrl: string) => {
+      events.push(`parse:${streamUrl}`)
+      return [
+        { url: `${streamUrl}/1.ts`, duration: 10 },
+        { url: `${streamUrl}/2.ts`, duration: 10 },
+      ]
+    }
+    service.downloadSegment = async (url: string, targetPath: string) => {
+      events.push(`download:${url}`)
+      fs.writeFileSync(targetPath, Buffer.alloc(16, 1))
+      return 16
+    }
+    service.runFfmpegMerge = async (_liveKey: string, _segments: string[], outputPath: string) => {
+      fs.writeFileSync(outputPath, Buffer.alloc(64, 2))
+    }
+
+    const progressValues: number[] = []
+    const originalPatch = backend.db.patchReplayIfStatus.bind(backend.db)
+    ;(backend.db as any).patchReplayIfStatus = (liveKey: string, statuses: readonly string[], patch: { progress?: number }) => {
+      if (typeof patch.progress === 'number') progressValues.push(patch.progress)
+      return originalPatch(liveKey, statuses, patch)
+    }
+
+    const output = await service.downloadReplayWithContext(
+      replay,
+      new AbortController().signal,
+      () => true,
+    ) as { finalPath: string; partPath: string }
+
+    assert.ok(
+      events.indexOf('parse:stream-2') < events.indexOf('download:stream-1/1.ts'),
+      'all playlists must be parsed before the first segment download',
+    )
+    assert.deepEqual(progressValues.slice(0, 4), [25, 50, 75, 98])
+    assert.equal(
+      progressValues.every((value, index) => index === 0 || value >= progressValues[index - 1]),
+      true,
+      `replay progress regressed: ${progressValues.join(', ')}`,
+    )
+    fs.rmSync(output.partPath, { force: true })
+    fs.rmSync(output.finalPath, { force: true })
+  } finally {
+    await destroyHarness(harness)
+  }
+}
+
 async function testAtomicReplayCompletion() {
   const harness = await createHarness('replay-atomic-completion-')
   try {
@@ -275,13 +382,64 @@ async function testAtomicReplayCompletion() {
   }
 }
 
+async function testDurationMismatchCannotPublishCompletedReplay() {
+  const harness = await createHarness('replay-duration-mismatch-')
+  try {
+    const { backend, baseDir } = harness
+    insertReplay(backend, 'duration-mismatch')
+    ;(backend.bilibiliClient as any).cacheReplayM3U8 = async (replay: { live_key: string; replay_id: number }) => {
+      const now = new Date().toISOString()
+      backend.db.prepare(
+        `INSERT INTO stream_slices
+         (created_at, updated_at, replay_id, start_time, end_time, stream, type, m3_u8_text)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(now, now, replay.replay_id, 0, 60, 'fixture', 0, '#EXTM3U\n#EXTINF:60,\nfixture.ts')
+    }
+
+    const service = backend.downloaderService as any
+    let finalPath = ''
+    let partPath = ''
+    service.downloadReplayWithContext = async (_replay: unknown, signal: AbortSignal, isCurrent: () => boolean) => {
+      const reserved = service.reserveOutputPaths(path.join(backend.config.download.output_dir, 'duration-mismatch.mp4'))
+      finalPath = reserved.finalPath
+      partPath = reserved.partPath
+      fs.writeFileSync(partPath, Buffer.alloc(1024, 9))
+      service.patchActiveReplay('duration-mismatch', ['downloading'], {
+        status: 'merging', progress: 99, message: 'fixture merge',
+      }, signal, isCurrent)
+      return reserved
+    }
+    service.verifyDuration = async () => ({ ok: false, duration: 500 })
+    service.getFileInfo = async () => {
+      throw new Error('file info must not run after failed duration verification')
+    }
+
+    assert.equal(backend.enqueueReplay('duration-mismatch', { resetProgress: true }), true)
+    const execution = backend.activeTasks.get('duration-mismatch')
+    assert.ok(execution)
+    await withTimeout(execution!.promise, 'duration mismatch failure')
+
+    const failed = backend.db.getReplayByLiveKey(baseDir, 'duration-mismatch')
+    assert.equal(failed?.status, 'failed')
+    assert.match(failed?.message || '', /duration verification failed/i)
+    assert.equal(failed?.file_path, '')
+    assert.equal(fs.existsSync(partPath), false, 'a failed verification must remove the part file')
+    assert.equal(fs.existsSync(finalPath), false, 'a failed verification must not publish a final file')
+  } finally {
+    await destroyHarness(harness)
+  }
+}
+
 async function main() {
   await testImmediatePauseResume()
   await testLateCacheCannotOverwritePause()
   await testRuntimePauseTracksOnlyItsOwnTasks()
+  await testReplayAndClipShareGlobalConcurrencyLimit()
   await testCleanupStaleWaitsForRuntime()
   await testReplayOutputReservationAndMissingSegments()
+  await testMultiStreamProgressNeverRegresses()
   await testAtomicReplayCompletion()
+  await testDurationMismatchCannotPublishCompletedReplay()
   console.log('replay state-machine and output lifecycle regression tests passed')
 }
 

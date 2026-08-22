@@ -57,6 +57,11 @@ assert.match(fs.readFileSync(path.join(sourceRoot, 'components', 'ReplayDetailsM
 const appSource = fs.readFileSync(path.join(sourceRoot, 'App.tsx'), 'utf8')
 assert.doesNotMatch(appSource, /savingConfig=\{useAppStore\.getState\(\)\.savingConfig\}/)
 assert.doesNotMatch(appSource, /paused=\{useAppStore\.getState\(\)\.paused\}/)
+const appControllerSource = fs.readFileSync(path.join(sourceRoot, 'components', 'AppController.tsx'), 'utf8')
+assert.match(appControllerSource, /startClipTaskPolling\(/, 'clip tasks must periodically reconcile missed websocket events')
+assert.match(appControllerSource, /showTaskCenter\) void fetchClipTasks\(\)/, 'opening task center must refresh canonical state immediately')
+assert.match(appControllerSource, /addEventListener\('focus', refreshOnFocus\)/, 'window focus must re-check externally deleted outputs')
+assert.match(appControllerSource, /scheduleReconnect\(generation\)/, 'websocket heartbeat timeout must have a reconnect fallback')
 const clipPageSource = fs.readFileSync(path.join(sourceRoot, 'ClipPage.tsx'), 'utf8')
 assert.match(
   clipPageSource,

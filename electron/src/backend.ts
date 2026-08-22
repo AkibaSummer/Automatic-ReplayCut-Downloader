@@ -395,7 +395,11 @@ export class DesktopBackend {
 
   private scheduleClipTasks() {
     const limit = Math.max(1, this.config.download.max_concurrent_tasks)
-    while (!this.stopping && this.clipTaskPromises.size < limit && this.clipTaskQueue.length > 0) {
+    while (
+      !this.stopping
+      && this.runningTasks + this.clipTaskPromises.size < limit
+      && this.clipTaskQueue.length > 0
+    ) {
       const taskId = this.clipTaskQueue.shift()!
       const runner = this.clipTaskRunners.get(taskId)
       this.clipTaskRunners.delete(taskId)
@@ -411,6 +415,9 @@ export class DesktopBackend {
         .finally(() => {
           if (this.clipTasksAbort.get(taskId) === controller) this.clipTasksAbort.delete(taskId)
           if (this.clipTaskPromises.get(taskId) === execution) this.clipTaskPromises.delete(taskId)
+          // Replay and clip work share the configured global task budget. Give
+          // the opposite queue first chance at the newly released slot.
+          this.scheduleQueue()
           this.scheduleClipTasks()
         })
       this.clipTaskPromises.set(taskId, execution)
@@ -476,7 +483,12 @@ export class DesktopBackend {
   }
 
   public scheduleQueue() {
-    while (!this.stopping && !this.runtimePaused && this.runningTasks < this.config.download.max_concurrent_tasks && this.queue.length > 0) {
+    while (
+      !this.stopping
+      && !this.runtimePaused
+      && this.runningTasks + this.clipTaskPromises.size < this.config.download.max_concurrent_tasks
+      && this.queue.length > 0
+    ) {
       let foundIndex = -1
       let targetKey: string | null = null
 
@@ -531,6 +543,9 @@ export class DesktopBackend {
               this.runningTasks = Math.max(0, this.runningTasks - 1)
               this.activeTasks.delete(liveKey)
             }
+            // See scheduleClipTasks: both task kinds consume the same global
+            // concurrency budget, with the opposite queue getting first turn.
+            this.scheduleClipTasks()
             this.scheduleQueue()
           })
         handle.promise = promise

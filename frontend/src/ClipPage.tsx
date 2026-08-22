@@ -18,6 +18,12 @@ import type { ClipPageProps, ClipTaskRecord, FeishuRecord, FeishuPageResult } fr
 import { getErrorMessage } from './utils'
 import { useAppStore } from './store'
 import { WaveformRequestRegistry } from './utils/waveformRequests'
+import {
+  initialWaveformViewport,
+  PREVIEW_DURATION_LIMIT_SECONDS,
+  waveformRequestErrorMessage,
+  WAVEFORM_CHUNK_DURATION_SECONDS,
+} from './utils/waveform'
 
 /** Parse time strings like "1:14:06", "30:00", "90" into seconds */
 function parseTimeInput(input: string): number | null {
@@ -61,6 +67,8 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   const [clipError, setClipError] = useState('')
   const [chunkPeaks, setChunkPeaks] = useState<Record<number, Float32Array>>({})
   const [chunkStatus, setChunkStatus] = useState<Record<number, 'loading' | 'loaded' | 'error'>>({})
+  const [waveformError, setWaveformError] = useState('')
+  const [waveformRetrying, setWaveformRetrying] = useState(false)
   const [playing, setPlaying] = useState(false)
   const [zoomWindow, setZoomWindow] = useState(120)
   const [scrollOffset, setScrollOffset] = useState(0)
@@ -74,6 +82,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   const [clipMode, setClipMode] = useState<'copy' | 'reencode' | 'smart'>('smart')
   const clipOutputRevisionRef = useRef(0)
   const waveformRequestsRef = useRef(new WaveformRequestRegistry())
+  const waveformRetryRef = useRef<AbortController | null>(null)
   const infoRequestRef = useRef<AbortController | null>(null)
   const previewRequestRef = useRef<AbortController | null>(null)
   const previewSequenceRef = useRef(0)
@@ -178,6 +187,8 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
   const beginVideoSession = useCallback(() => {
     infoRequestRef.current?.abort()
     infoRequestRef.current = null
+    waveformRetryRef.current?.abort()
+    waveformRetryRef.current = null
     previewRequestRef.current?.abort()
     previewRequestRef.current = null
     previewSequenceRef.current += 1
@@ -188,6 +199,8 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     setLoadedUrl('')
     setChunkPeaks({})
     setChunkStatus({})
+    setWaveformError('')
+    setWaveformRetrying(false)
     setPlaying(false)
     setAudioQualityIndex(0)
     setVideoQualityIndex(0)
@@ -197,6 +210,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
 
   useEffect(() => () => {
     infoRequestRef.current?.abort()
+    waveformRetryRef.current?.abort()
     previewRequestRef.current?.abort()
     previewSequenceRef.current += 1
     waveformRequestsRef.current.beginSession()
@@ -218,8 +232,9 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       setLoadedUrl(targetUrl)
       setStartTime(0)
       setEndTime(info.duration)
-      setScrollOffset(info.duration / 2)
-      setZoomWindow(info.duration + 40)
+      const viewport = initialWaveformViewport(info.duration)
+      setScrollOffset(viewport.scrollOffset)
+      setZoomWindow(viewport.zoomWindow)
     } catch (e) {
       if (!waveformRequestsRef.current.isGenerationCurrent(generation) || controller.signal.aborted) return
       setClipError(getErrorMessage(e))
@@ -229,7 +244,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     }
   }
 
-  const CHUNK_DURATION = 60
+  const CHUNK_DURATION = WAVEFORM_CHUNK_DURATION_SECONDS
   const PEAKS_PER_SEC = 30
 
   // Progressive Chunk Loader Effect with cancellation
@@ -305,7 +320,9 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       apiClient.get(audioUrl, { responseType: 'arraybuffer', signal: token.controller.signal }).then(async resp => {
          if (!requests.isCurrent(token)) return
          const ctx = audioCtxRef.current!
-         if (ctx.state === 'suspended') await ctx.resume()
+         // decodeAudioData does not require playback permission. Calling
+         // resume() here runs outside a user gesture and can be rejected by
+         // browser autoplay policy, leaving the waveform permanently blank.
          const buffer = await ctx.decodeAudioData(resp.data as ArrayBuffer)
          if (!requests.isCurrent(token)) return
          const data = buffer.getChannelData(0)
@@ -330,12 +347,45 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
           const belongsToCurrentVideo = requests.isGenerationCurrent(token.generation) && requests.owns(token)
           requests.finish(token)
           if (err?.name === 'CanceledError' || err?.code === 'ERR_CANCELED') return // Intentional cancel
-          if (!belongsToCurrentVideo) return
-          console.error('Failed to load chunk', chunkIdx, err)
-         setChunkStatus(prev => ({ ...prev, [chunkIdx]: 'error' }))
-      })
+           if (!belongsToCurrentVideo) return
+           console.error('Failed to load chunk', chunkIdx, err)
+           setChunkStatus(prev => ({ ...prev, [chunkIdx]: 'error' }))
+           setWaveformError(t('waveform.segmentFailed', {
+             time: fmtTime(fetchStart),
+             error: waveformRequestErrorMessage(err),
+           }))
+       })
     })
-  }, [videoInfo, startTime, endTime, scrollOffset, zoomWindow, chunkStatus, apiClient])
+  }, [videoInfo, startTime, endTime, scrollOffset, zoomWindow, chunkStatus, apiClient, fmtTime, t])
+
+  const retryWaveform = useCallback(async () => {
+    if (!loadedUrl || waveformRetrying) return
+    waveformRetryRef.current?.abort()
+    const controller = new AbortController()
+    waveformRetryRef.current = controller
+    setWaveformError('')
+    setWaveformRetrying(true)
+    try {
+      // Bilibili DASH URLs are signed and short-lived. A retry must refresh the
+      // playurl contract instead of repeating the already-expired CDN URL.
+      const response = await apiClient.post('/api/clip/info', { url: loadedUrl }, { signal: controller.signal })
+      if (controller.signal.aborted) return
+      setVideoInfo(response.data)
+      waveformRequestsRef.current.beginSession()
+      setChunkStatus(previous => Object.fromEntries(
+        Object.entries(previous).filter(([, status]) => status === 'loaded'),
+      ))
+    } catch (error) {
+      const candidate = error as { name?: string; code?: string }
+      if (controller.signal.aborted || candidate.name === 'CanceledError' || candidate.code === 'ERR_CANCELED') return
+      setWaveformError(t('waveform.refreshFailed', { error: waveformRequestErrorMessage(error) }))
+    } finally {
+      if (waveformRetryRef.current === controller) {
+        waveformRetryRef.current = null
+        setWaveformRetrying(false)
+      }
+    }
+  }, [apiClient, loadedUrl, t, waveformRetrying])
 
   const drawWaveform = useCallback(() => {
     const canvas = canvasRef.current
@@ -346,6 +396,9 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     const rect = canvas.getBoundingClientRect()
     const w = rect.width
     const h = rect.height
+    // ClipPage remains mounted while another page is selected. Avoid clearing
+    // the backing bitmap when display:none reports a zero-sized canvas.
+    if (w <= 0 || h <= 0) return
     canvas.width = w * dpr
     canvas.height = h * dpr
     ctx.scale(dpr, dpr)
@@ -429,6 +482,21 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
 
   useEffect(() => {
     drawWaveform()
+  }, [drawWaveform])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const observer = new ResizeObserver(() => drawWaveform())
+    observer.observe(canvas)
+    const redrawWhenVisible = () => {
+      if (document.visibilityState === 'visible') drawWaveform()
+    }
+    document.addEventListener('visibilitychange', redrawWhenVisible)
+    return () => {
+      observer.disconnect()
+      document.removeEventListener('visibilitychange', redrawWhenVisible)
+    }
   }, [drawWaveform])
 
   useEffect(() => {
@@ -516,10 +584,11 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
     setPlaying(true)
     try {
        const lowestQualityAudio = videoInfo.qualities!.audio[videoInfo.qualities!.audio.length - 1]
+       const previewDuration = Math.min(endTime - startTime, PREVIEW_DURATION_LIMIT_SECONDS)
        const queryParams = new URLSearchParams({
          url: lowestQualityAudio.baseUrl || videoInfo.audioProxyPath.split('?url=')[1] || '',
          start: startTime.toString(),
-         duration: (endTime - startTime).toString()
+         duration: previewDuration.toString()
        })
        const audioUrl = `/api/clip/audio-proxy?${queryParams.toString()}`
        const resp = await apiClient.get(audioUrl, { responseType: 'arraybuffer', signal: controller.signal })
@@ -578,9 +647,10 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
       })
       showToast({ tone: 'success', title: 'Added to Task Queue', message: `Task ID: ${res.data.taskId}` })
       setShowClipDialog(false)
-      void apiClient.get<ClipTaskRecord[]>('/api/clip/tasks', { params: { _t: Date.now() } })
-        .then(tasks => useAppStore.getState().mergeClipTasks(tasks.data))
-        .catch(() => {})
+      const taskSnapshotRequestedAt = Date.now()
+      void apiClient.get<ClipTaskRecord[]>('/api/clip/tasks', { params: { _t: taskSnapshotRequestedAt } })
+        .then(tasks => useAppStore.getState().reconcileClipTaskSnapshot(tasks.data, taskSnapshotRequestedAt))
+        .catch(error => console.error('Failed to refresh clip tasks after enqueue:', error))
     } catch (e) {
       setClipError(getErrorMessage(e))
       showToast({ tone: 'error', title: 'Failed to add task', message: getErrorMessage(e) })
@@ -1228,6 +1298,22 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
             onMouseLeave={handleCanvasMouseUp}
             onWheel={handleCanvasWheel}
           />
+          {waveformError && (
+            <div role="alert" className="flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
+              <span className="flex min-w-0 items-center gap-2">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span className="truncate">{waveformError}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => { void retryWaveform() }}
+                disabled={waveformRetrying}
+                className="shrink-0 rounded-md border border-red-200 bg-white px-2.5 py-1 font-medium hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {waveformRetrying ? t('waveform.retrying') : t('waveform.retry')}
+              </button>
+            </div>
+          )}
 
           {/* Play/Pause */}
           {Object.keys(chunkPeaks).length > 0 && (
@@ -1241,6 +1327,7 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
               </button>
               <span className="text-xs text-slate-500">
                 {fmtTime(startTime)} – {fmtTime(endTime)}
+                {endTime - startTime > PREVIEW_DURATION_LIMIT_SECONDS && ` · ${t('waveform.previewLimited', { seconds: PREVIEW_DURATION_LIMIT_SECONDS })}`}
               </span>
             </div>
           )}
@@ -1272,20 +1359,20 @@ export function ClipPage({ apiClient, apiBase, showToast, t, clipTasks }: ClipPa
                       {(task.status === 'processing' || task.status === 'pending') && (
                         <button
                           onClick={() => {
-                            apiClient.post(`/api/clip/cancel/${task.id}`).then(() => {
-                              useAppStore.getState().upsertClipTask({
-                                ...task,
-                                status: 'error',
-                                message: 'Cancelled',
-                                file_path: '',
-                                updated_at: task.updated_at,
-                              })
-                              return apiClient.get<ClipTaskRecord[]>('/api/clip/tasks', { params: { _t: Date.now() } })
-                            }).then(response => {
-                              if (response) useAppStore.getState().mergeClipTasks(response.data)
-                            }).catch(error => {
-                              showToast({ tone: 'error', title: t('clipTask.failed'), message: getErrorMessage(error) })
-                            })
+                            void (async () => {
+                              try {
+                                const cancelResponse = await apiClient.post(`/api/clip/cancel/${task.id}`)
+                                const canonicalTask = cancelResponse.data?.task as ClipTaskRecord | undefined
+                                if (canonicalTask) useAppStore.getState().upsertClipTask(canonicalTask)
+                                const taskSnapshotRequestedAt = Date.now()
+                                const response = await apiClient.get<ClipTaskRecord[]>('/api/clip/tasks', {
+                                  params: { _t: taskSnapshotRequestedAt },
+                                })
+                                useAppStore.getState().reconcileClipTaskSnapshot(response.data, taskSnapshotRequestedAt)
+                              } catch (error) {
+                                showToast({ tone: 'error', title: t('clipTask.failed'), message: getErrorMessage(error) })
+                              }
+                            })()
                           }}
                           className="text-[10px] text-slate-500 hover:text-red-500 hover:underline px-1 cursor-pointer"
                         >
