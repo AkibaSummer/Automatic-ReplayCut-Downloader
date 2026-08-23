@@ -45,6 +45,32 @@ async function main() {
   try {
     const service = new ClipService(configFor(baseDir), clientStub() as never, baseDir) as any
 
+    const validOutput = path.join(baseDir, 'valid-output.mp4')
+    await service.runFfmpegCommand([
+      '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=30:duration=2',
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:sample_rate=48000:duration=2',
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+      '-y', validOutput,
+    ])
+    await service.verifyClipOutput(validOutput, 2, 'reencode')
+    await assert.rejects(
+      service.verifyClipOutput(validOutput, 30, 'reencode'),
+      /output verification failed: expected 30\.0s/,
+      'a decodable but severely truncated clip must not be published as done',
+    )
+    const invalidOutput = path.join(baseDir, 'invalid-output.mp4')
+    fs.writeFileSync(invalidOutput, Buffer.alloc(1024, 1))
+    await assert.rejects(
+      service.verifyClipOutput(invalidOutput, 2, 'reencode'),
+      /output verification failed/i,
+      'a non-empty but undecodable file must not be published as done',
+    )
+
+    // The remaining lifecycle cases use lightweight fake MP4 bytes and focus
+    // on reservation/cleanup. Output verification itself is covered above.
+    service.verifyClipOutput = async () => {}
+
     assert.equal(service.resolveClipMode('smart', 'avc1.640032'), 'smart')
     assert.equal(service.resolveClipMode('smart', 'h264'), 'smart')
     assert.equal(service.resolveClipMode('smart', 'hev1.1.6.L150.90'), 'reencode')
@@ -73,6 +99,7 @@ async function main() {
       cookieHeader: () => '',
     }
     const qualityService = new ClipService(configFor(baseDir), qualityClient as never, baseDir) as any
+    qualityService.verifyClipOutput = async () => {}
     qualityService.localCopyCut = async (...args: unknown[]) => {
       selectedUrls.push(String(args[0]), String(args[1]))
       fs.writeFileSync(String(args[5]), Buffer.alloc(512, 5))
@@ -106,6 +133,7 @@ async function main() {
       }),
     }
     const fallbackService = new ClipService(configFor(baseDir), hevcClient as never, baseDir) as any
+    fallbackService.verifyClipOutput = async () => {}
     fallbackService.localSmartCut = async () => { throw new Error('HEVC must not enter Smart Cut') }
     fallbackService.localReencode = async (...args: unknown[]) => {
       fs.writeFileSync(String(args[5]), Buffer.alloc(512, 4))
@@ -163,6 +191,30 @@ async function main() {
     assert.equal(fs.existsSync(failedPart), false, 'a non-empty failed part must be removed')
     assert.equal(fs.existsSync(path.join(configFor(baseDir).download.clip_output_dir, 'failed.mp4')), false)
     assert.deepEqual(fs.readdirSync(configFor(baseDir).download.temp_dir), [], 'failed temp data must be removed')
+
+    let collisionPart = ''
+    let collisionFinal = ''
+    service.localSmartCut = async (...args: unknown[]) => {
+      collisionPart = String(args[5])
+      collisionFinal = collisionPart.replace(/\.part\.mp4$/i, '.mp4')
+      fs.writeFileSync(collisionPart, Buffer.alloc(3072, 8))
+      fs.writeFileSync(collisionFinal, 'external sentinel')
+      return { size: 3072 }
+    }
+    await assert.rejects(
+      service.executeClip('fixture', 'publish-collision', 1, 2, 0, 0, undefined, false, false, 'smart'),
+      (error: unknown) => {
+        const fileError = error as NodeJS.ErrnoException & { recoverablePath?: string; publishedPath?: string }
+        return fileError.code === 'EEXIST'
+          && fileError.recoverablePath === collisionPart
+          && fileError.publishedPath === ''
+      },
+      'a destination appearing after reservation must never be overwritten',
+    )
+    assert.equal(fs.readFileSync(collisionFinal, 'utf8'), 'external sentinel')
+    assert.equal(fs.existsSync(collisionPart), true, 'the verified losing output must be preserved for recovery')
+    fs.rmSync(collisionPart, { force: true })
+    fs.rmSync(collisionFinal, { force: true })
 
     const controller = new AbortController()
     let abortedPart = ''

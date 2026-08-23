@@ -4,7 +4,14 @@ import { initReactI18next } from 'react-i18next';
 import en from './locales/en.json';
 import zh from './locales/zh.json';
 
-const savedLang = localStorage.getItem('lang');
+let savedLang: string | null = null;
+try {
+  savedLang = localStorage.getItem('lang');
+} catch (error) {
+  // Storage can be unavailable for file:// pages under restrictive Windows or
+  // enterprise policies. Language preference failure must never block React.
+  console.warn('[i18n] Unable to read saved language:', error);
+}
 const defaultLang = savedLang === 'en' ? 'en' : 'zh';
 
 i18n

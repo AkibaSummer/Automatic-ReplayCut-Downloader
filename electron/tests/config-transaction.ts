@@ -37,6 +37,7 @@ async function main() {
 
     backend.config.server.port = 0
     const baseURL = await backend.listen()
+    await backend.waitForStartupReconciliation()
     const staleSettingsSnapshot = structuredClone(backend.config)
     staleSettingsSnapshot.feishu.app_id = ''
     staleSettingsSnapshot.feishu.app_secret = ''

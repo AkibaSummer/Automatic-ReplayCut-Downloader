@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import YAML from 'yaml'
 import { AppConfig } from './types'
 
@@ -113,6 +114,123 @@ export function loadConfigFile(baseDir: string, configPath: string): AppConfig {
       throw error
     }
   }
+}
+
+async function sqliteFileIsUsable(filePath: string) {
+  let handle: Awaited<ReturnType<typeof fsp.open>> | undefined
+  try {
+    handle = await fsp.open(filePath, 'r')
+    const header = Buffer.alloc(16)
+    const { bytesRead } = await handle.read(header, 0, header.length, 0)
+    return bytesRead === header.length && header.toString('binary') === 'SQLite format 3\0'
+  } catch {
+    return false
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+async function sampledFileFingerprint(filePath: string) {
+  let handle: Awaited<ReturnType<typeof fsp.open>> | undefined
+  try {
+    const stat = await fsp.stat(filePath, { bigint: true })
+    if (!stat.isFile()) return ''
+    handle = await fsp.open(filePath, 'r')
+    const sampleBytes = 64 * 1024
+    const size = Number(stat.size)
+    const offsets = [...new Set([
+      0,
+      Math.max(0, Math.floor(size / 2) - Math.floor(sampleBytes / 2)),
+      Math.max(0, size - sampleBytes),
+    ])]
+    const hash = createHash('sha256').update(String(stat.size))
+    for (const offset of offsets) {
+      const buffer = Buffer.alloc(Math.min(sampleBytes, Math.max(0, size - offset)))
+      if (buffer.length === 0) continue
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset)
+      hash.update(buffer.subarray(0, bytesRead))
+    }
+    return hash.digest('hex')
+  } catch {
+    return ''
+  } finally {
+    await handle?.close().catch(() => undefined)
+  }
+}
+
+async function findPortableDatabaseCandidate(baseDir: string, legacyPath: string) {
+  const basename = path.basename(legacyPath)
+  const rootCandidate = path.join(baseDir, basename)
+  if (await sqliteFileIsUsable(rootCandidate)) return rootCandidate
+  let entries: fs.Dirent[] = []
+  try {
+    entries = await fsp.readdir(baseDir, { withFileTypes: true })
+  } catch {}
+  const candidates: string[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === 'resources') continue
+    const candidate = path.join(baseDir, entry.name, basename)
+    if (await sqliteFileIsUsable(candidate)) candidates.push(candidate)
+  }
+  return candidates.length === 1 ? candidates[0] : ''
+}
+
+/**
+ * Old portable builds persisted normalized absolute paths. After copying the
+ * whole application directory, that made the new executable silently keep
+ * using the database in the old folder. Relocate only when the new base has one
+ * valid SQLite candidate and either the old path is unavailable or both files
+ * have the same size/sample fingerprint. The proven old base can then safely
+ * remap the other package-local paths without touching genuine external paths.
+ */
+export async function recoverPortableConfigPaths(
+  baseDir: string,
+  configPath: string,
+  input: AppConfig,
+) {
+  const config = structuredClone(input)
+  const legacyDsn = path.resolve(config.database.dsn)
+  const dsnRelativeToCurrent = path.relative(baseDir, legacyDsn)
+  const alreadyCurrent = dsnRelativeToCurrent === ''
+    || (!dsnRelativeToCurrent.startsWith(`..${path.sep}`) && dsnRelativeToCurrent !== '..' && !path.isAbsolute(dsnRelativeToCurrent))
+  if (alreadyCurrent) return config
+
+  const candidate = await findPortableDatabaseCandidate(baseDir, legacyDsn)
+  if (!candidate || path.resolve(candidate) === legacyDsn) return config
+
+  const oldFingerprint = await sampledFileFingerprint(legacyDsn)
+  const candidateFingerprint = await sampledFileFingerprint(candidate)
+  if (!candidateFingerprint || (oldFingerprint && oldFingerprint !== candidateFingerprint)) return config
+
+  const candidateRelative = path.relative(baseDir, candidate)
+  const legacyLower = path.normalize(legacyDsn).toLocaleLowerCase()
+  const suffixLower = path.normalize(candidateRelative).toLocaleLowerCase()
+  const suffixIndex = legacyLower.endsWith(`${path.sep}${suffixLower}`)
+    ? legacyDsn.length - candidateRelative.length
+    : -1
+  const oldBase = suffixIndex > 0
+    ? legacyDsn.slice(0, suffixIndex).replace(/[\\/]$/, '')
+    : path.dirname(legacyDsn)
+  const remapPackageLocalPath = (value: string) => {
+    if (!value || !path.isAbsolute(value)) return value
+    const relative = path.relative(oldBase, path.resolve(value))
+    if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return value
+    return path.resolve(baseDir, relative)
+  }
+
+  config.database.dsn = candidate
+  config.bilibili.cookie_file = remapPackageLocalPath(config.bilibili.cookie_file)
+  config.download.output_dir = remapPackageLocalPath(config.download.output_dir)
+  config.download.temp_dir = remapPackageLocalPath(config.download.temp_dir)
+  config.download.clip_output_dir = remapPackageLocalPath(config.download.clip_output_dir)
+  await saveConfigFile(baseDir, configPath, config)
+  Object.defineProperty(config, '__portable_previous_base', {
+    value: oldBase,
+    enumerable: false,
+    configurable: false,
+  })
+  console.warn(`[config] Relocated copied portable database from ${legacyDsn} to ${candidate}`)
+  return config
 }
 
 async function replaceFile(sourcePath: string, destinationPath: string) {

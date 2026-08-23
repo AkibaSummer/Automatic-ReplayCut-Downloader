@@ -1,7 +1,7 @@
 {
   "name": "automatic-replaycut-downloader-desktop",
   "private": true,
-  "version": "0.3.9",
+  "version": "0.3.14",
   "description": "Electron + React desktop app for Bilibili replay management",
   "main": "electron-dist/main.js",
   "type": "commonjs",
@@ -60,6 +60,7 @@
       "package.json",
       "!**/{test,tests,__tests__,spec,example,examples}/**",
       "!**/*.{md,map,d.ts}",
+      "!node_modules/**/*.{ts,tsx}",
       "!**/CHANGELOG*",
       "!**/README*",
       "node_modules/sql.js/dist/sql-wasm.js",
@@ -68,7 +69,8 @@
       "!node_modules/sql.js/dist/sql-wasm-debug*",
       "!node_modules/sql.js/dist/sql-wasm-browser*",
       "!node_modules/sql.js/dist/worker*",
-      "!node_modules/music-metadata/test/**"
+      "!node_modules/music-metadata/test/**",
+      "!node_modules/fluent-ffmpeg/doc/**"
     ],
     "win": {
       "target": [

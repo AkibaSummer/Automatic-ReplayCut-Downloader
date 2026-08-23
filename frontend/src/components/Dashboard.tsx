@@ -2,7 +2,7 @@ import { RefreshCcw, Loader2, Download, MoreHorizontal, Copy, CheckCircle, XCirc
 import { useTranslation } from 'react-i18next'
 import { useAppStore } from '../store'
 import { useShallow } from 'zustand/react/shallow'
-import { formatBytes, getErrorMessage, shouldUseRealtimeProgress, statusColor } from '../utils'
+import { formatBytes, getErrorMessage, getReplayDisplayStatus, isReplayRelocationPending, shouldUseRealtimeProgress, statusColor } from '../utils'
 import { Tooltip } from './index'
 import React, { useRef, useEffect } from 'react'
 
@@ -245,7 +245,9 @@ export function Dashboard({
           {replays.map(r => {
             const rawProgress = progressMap[r.live_key]
             const p = shouldUseRealtimeProgress(rawProgress, r) ? rawProgress : undefined
-            const displayStatus = p?.status || r.status
+            const rawDisplayStatus = p?.status || r.status
+            const displayStatus = getReplayDisplayStatus(rawDisplayStatus, r.message, r.output_state)
+            const relocationPending = isReplayRelocationPending(r)
             const baseProgress = Math.max(0, Math.min(100, p?.progress ?? r.progress ?? 0))
             const mergeProgress = Math.max(0, Math.min(100, p?.merge_progress ?? 0))
 
@@ -256,7 +258,7 @@ export function Dashboard({
               displayProgress = 95 + (mergeProgress * 0.05)
             }
 
-            const showProgress = ['downloading', 'merging', 'paused'].includes(displayStatus)
+            const showProgress = ['downloading', 'merging', 'paused', 'deleting'].includes(displayStatus)
             const progText = p?.message || r.message
             const barColor =
               displayStatus === 'paused'
@@ -292,12 +294,19 @@ export function Dashboard({
                       <div className="flex flex-wrap items-center gap-2">
                         <span className={`inline-flex items-center gap-2 text-xs font-medium px-2 py-1 rounded-full border border-slate-200 bg-white shadow-sm`}>
                           <span className={`w-2 h-2 rounded-full ${statusColor(displayStatus)}`}></span>
-                          {displayStatus.toUpperCase()}
+                          {displayStatus === 'unavailable'
+                            ? t('dashboard.statusUnavailable')
+                            : displayStatus === 'ownership_changed'
+                            ? t('dashboard.statusOwnershipChanged')
+                            : displayStatus === 'unknown'
+                            ? t('common.loading')
+                            : displayStatus.toUpperCase()}
                         </span>
                         {displayStatus === 'completed' && <CheckCircle className="w-4 h-4 text-green-500" />}
                         {displayStatus === 'failed' && <XCircle className="w-4 h-4 text-red-500" />}
                         {displayStatus === 'deleted' && <XCircle className="w-4 h-4 text-violet-500" />}
                         {(displayStatus === 'downloading' || displayStatus === 'merging') && <Loader2 className="w-4 h-4 text-[var(--color-bili-blue)] animate-spin" />}
+                        {displayStatus === 'deleting' && <Loader2 className="w-4 h-4 text-amber-500 animate-spin" />}
                         {displayStatus === 'paused' && <PauseCircle className="w-4 h-4 text-amber-500" />}
                       </div>
                     </div>
@@ -341,7 +350,7 @@ export function Dashboard({
                     {['failed', 'deleted', 'not_downloaded'].includes(displayStatus) && (
                       <button
                         onClick={() => handleDownload(r.live_key)}
-                        disabled={!backendOnline || paused}
+                        disabled={!backendOnline || paused || relocationPending}
                         className="p-2.5 text-slate-500 hover:text-[var(--color-bili-blue)] rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5 disabled:opacity-50"
                       >
                         <Tooltip content={t('dashboard.startBtn')}>
@@ -363,7 +372,7 @@ export function Dashboard({
                     {displayStatus === 'paused' && (
                       <button
                         onClick={() => handleResumeReplay(r.live_key)}
-                        disabled={!backendOnline || paused}
+                        disabled={!backendOnline || paused || relocationPending}
                         className="p-2.5 text-slate-500 hover:text-green-600 rounded-xl bg-white border border-slate-200 shadow-sm transition duration-200 hover:-translate-y-0.5 disabled:opacity-50"
                       >
                         <Tooltip content={t('dashboard.resumeBtn')}>

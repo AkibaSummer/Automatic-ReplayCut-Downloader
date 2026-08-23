@@ -3,43 +3,12 @@ import path from 'node:path'
 import type { DesktopBackend } from '../backend'
 import type { Request, Response } from 'express'
 import { resolveAppPathWithBase } from '../config'
+import { isUsableClipOutput } from '../db'
+import { fileMatchesIdentity, removeFileWithRetry, tryReadFileIdentity } from '../utils'
 import { fetchImageResource, ImageProxyError } from './bilibili'
+import { registerAudioProxyRoutes } from './audioProxy'
 
 const BILIBILI_MEDIA_HOSTS = ['hdslb.com', 'bilibili.com', 'bilivideo.com', 'biliimg.com', 'akamaized.net']
-
-function validateBilibiliMediaUrl(rawUrl: string) {
-  const parsed = new URL(rawUrl)
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error('URL protocol not allowed')
-  }
-  if (!BILIBILI_MEDIA_HOSTS.some(domain => parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`))) {
-    throw new Error('Domain not allowed')
-  }
-  return parsed.toString()
-}
-
-async function fetchValidatedBilibiliMedia(
-  backend: DesktopBackend,
-  rawUrl: string,
-  signal?: AbortSignal,
-) {
-  let currentUrl = validateBilibiliMediaUrl(rawUrl)
-  for (let redirects = 0; redirects <= 3; redirects += 1) {
-    const response = await backend.bilibiliClient.fetchWithCookies(currentUrl, {
-      redirect: 'manual',
-      signal,
-    })
-    if (response.status < 300 || response.status >= 400) {
-      return { url: currentUrl, response }
-    }
-    const location = response.headers.get('location')
-    await response.body?.cancel().catch(() => undefined)
-    if (!location) throw new Error('Media redirect is missing a location')
-    if (redirects === 3) throw new Error('Too many media redirects')
-    currentUrl = validateBilibiliMediaUrl(new URL(location, currentUrl).toString())
-  }
-  throw new Error('Too many media redirects')
-}
 
 async function spawnSystemOpener(target: string, selectFile = false) {
   const { spawn } = await import('node:child_process')
@@ -56,6 +25,41 @@ async function spawnSystemOpener(target: string, selectFile = false) {
 }
 
 export function registerClipRoutes(backend: DesktopBackend) {
+  registerAudioProxyRoutes(backend)
+  const resolveTrackedPath = (value: string) => path.isAbsolute(value)
+    ? path.resolve(value)
+    : path.resolve(backend.baseDir, value)
+  const sameTrackedPath = (left: string, right: string) => process.platform === 'win32'
+    ? resolveTrackedPath(left).toLocaleLowerCase() === resolveTrackedPath(right).toLocaleLowerCase()
+    : resolveTrackedPath(left) === resolveTrackedPath(right)
+  const trackedArtifactIdentities = (requestedPath: string) => {
+    const identities = new Set<string>()
+    let tracked = false
+    for (const replay of backend.db.getReplays(backend.baseDir)) {
+      const candidates = [
+        [replay.file_path, replay.output_identity],
+        [replay.recoverable_part_path, replay.output_identity],
+        [replay.cleanup_part_path, replay.cleanup_part_identity],
+      ] as const
+      for (const [candidatePath, identity] of candidates) {
+        if (!candidatePath || !sameTrackedPath(candidatePath, requestedPath)) continue
+        tracked = true
+        if (identity) identities.add(identity)
+      }
+    }
+    for (const task of backend.db.getClipTasks()) {
+      for (const [candidatePath, identity] of [
+        [task.file_path, task.artifact_identity],
+        [task.part_path, task.part_identity || task.artifact_identity],
+      ] as const) {
+        if (!candidatePath || !sameTrackedPath(candidatePath, requestedPath)) continue
+        tracked = true
+        if (identity) identities.add(identity)
+      }
+    }
+    return { tracked, identities }
+  }
+
   // Cover image proxy — fetches external B站 cover images to avoid mixed-content blocks
   backend.app.get('/api/clip/cover-proxy', async (req: Request, res: Response) => {
     const controller = new AbortController()
@@ -125,108 +129,18 @@ export function registerClipRoutes(backend: DesktopBackend) {
     }
   })
 
-  backend.app.get('/api/clip/audio-proxy', async (req: Request, res: Response) => {
-    const controller = new AbortController()
-    const stopRequest = () => controller.abort()
-    req.once('aborted', stopRequest)
-    res.once('close', () => {
-      if (!res.writableEnded) stopRequest()
-    })
-    try {
-      const url = req.query.url as string
-      const start = req.query.start === undefined ? 0 : Number(req.query.start)
-      const duration = req.query.duration === undefined ? 0 : Number(req.query.duration)
-      if (!url) throw new Error('Missing audio URL')
-      if (!Number.isFinite(start) || start < 0 || !Number.isFinite(duration) || duration < 0) {
-        res.status(400).json({ error: 'start and duration must be finite non-negative numbers' })
-        return
-      }
-      let media: Awaited<ReturnType<typeof fetchValidatedBilibiliMedia>>
-      try {
-        media = await fetchValidatedBilibiliMedia(backend, url, controller.signal)
-      } catch (error) {
-        res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid URL' })
-        return
-      }
-      if (!media.response.ok) {
-        await media.response.body?.cancel().catch(() => undefined)
-        res.status(media.response.status).json({ error: `Upstream media request failed: HTTP ${media.response.status}` })
-        return
-      }
-      const validatedUrl = media.url
-      
-      if (duration > 0) {
-        await media.response.body?.cancel().catch(() => undefined)
-        res.setHeader('content-type', 'audio/mpeg')
-        // Use child_process.spawn directly because fluent-ffmpeg doesn't properly quote -headers
-        const cookie = backend.bilibiliClient.cookieHeader()
-        const headers = `Referer: https://www.bilibili.com/\\r\\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\\r\\nCookie: ${cookie}\\r\\n`
-        const ffmpegPath = (require('ffmpeg-static') || '').replace('app.asar', 'app.asar.unpacked')
-        const { spawn } = require('node:child_process')
-        const args = [
-          '-ss', `${start}`,
-          '-headers', headers,
-          '-i', validatedUrl,
-          '-t', `${duration}`,
-          '-f', 'mp3',
-          '-c:a', 'libmp3lame',
-          '-b:a', '32k',
-          '-ar', '8000',
-          '-ac', '1',
-          'pipe:1'
-        ]
-        console.log('[audio-proxy] spawning ffmpeg')
-        const proc = spawn(ffmpegPath, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
-        proc.stdout.pipe(res)
-        proc.stderr.on('data', (d: Buffer) => {
-          const msg = d.toString()
-          if (msg.includes('Error') || msg.includes('error')) console.error('[audio-proxy] ffmpeg stderr:', msg)
-        })
-        proc.on('error', (err: Error) => {
-          console.error('[audio-proxy] spawn error:', err)
-          if (!res.headersSent) res.status(500).json({ error: err.message })
-        })
-        const stopProxyProcess = () => {
-          if (proc.exitCode === null) proc.kill()
-        }
-        proc.on('close', (code: number | null) => {
-          req.off('aborted', stopProxyProcess)
-          if (code !== 0 && code !== null) console.error('[audio-proxy] ffmpeg exited with code', code)
-          if (!res.writableEnded) res.end()
-        })
-        req.once('aborted', stopProxyProcess)
-        res.once('close', () => {
-          if (!res.writableEnded) stopProxyProcess()
-        })
-        return
-      }
-
-      // For non-duration requests, stream directly via authenticated fetch
-      const response = media.response
-      res.setHeader('content-type', response.headers.get('content-type') || 'audio/mp4')
-      const contentLength = response.headers.get('content-length')
-      if (contentLength) res.setHeader('content-length', contentLength)
-      res.setHeader('accept-ranges', 'bytes')
-      if (response.body) {
-        const { Readable } = require('node:stream')
-        Readable.fromWeb(response.body).pipe(res)
-      } else {
-        const buffer = Buffer.from(await response.arrayBuffer())
-        res.send(buffer)
-      }
-    } catch (error) {
-      if (!res.headersSent && !controller.signal.aborted) backend.sendError(res, error)
-    } finally {
-      req.off('aborted', stopRequest)
-    }
-  })
-
   backend.app.get('/api/clip/tasks', (req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store')
-    for (const taskId of backend.db.healMissingClipFiles(backend.baseDir)) {
-      backend.emitClipTaskUpdate(taskId)
-    }
-    res.json(backend.db.getClipTasks())
+    // Keep the hot poll metadata-only. At most once per minute start an async
+    // reconciliation; updates arrive over the existing websocket without
+    // making an offline/network drive block this request or the whole backend.
+    backend.scheduleClipOutputReconciliation()
+    const tasks = backend.db.getClipTasks(500)
+    res.json(backend.databaseMaintenance
+      ? tasks.map(task => task.status === 'done'
+        ? { ...task, output_state: 'unknown' as const }
+        : task)
+      : tasks)
   })
 
   backend.app.post('/api/clip/execute', async (req: Request, res: Response) => {
@@ -245,12 +159,129 @@ export function registerClipRoutes(backend: DesktopBackend) {
 
       backend.emitClipTaskUpdate(taskId)
       const queued = backend.enqueueClipTask(taskId, async controller => {
+        const cancellationRequested = () => (
+          controller.signal.aborted
+          || backend.clipTasksAbort.get(taskId) !== controller
+          || backend.db.getClipTaskById(taskId)?.status === 'cancelling'
+        )
+        const persistArtifact = async (patch: Parameters<typeof backend.db.updateClipTask>[1]) => {
+          if (backend.clipTasksAbort.get(taskId) !== controller) return
+          backend.db.updateClipTask(taskId, patch)
+          await backend.db.checkpoint()
+          backend.emitClipTaskUpdate(taskId)
+        }
+        const commitTerminalTask = async (patch: Parameters<typeof backend.db.updateClipTask>[1]) => {
+          if (cancellationRequested()) return false
+          // The state write and removal from the cancellable map are both
+          // synchronous, so a cancel request can observe either "still
+          // cancellable" or the terminal row, never an in-between promise.
+          backend.db.updateClipTask(taskId, patch)
+          if (backend.clipTasksAbort.get(taskId) === controller) backend.clipTasksAbort.delete(taskId)
+          try {
+            await backend.db.checkpoint()
+          } catch (checkpointError) {
+            // The published/verified artifact checkpoint already makes the
+            // output recoverable. Keep the terminal in-memory state while the
+            // store's dirty retry/close path persists it again.
+            console.error(`[clip] Failed to checkpoint terminal task ${taskId}:`, checkpointError)
+          }
+          backend.emitClipTaskUpdate(taskId)
+          return true
+        }
+        const cleanupCancelledArtifacts = async (extra?: { finalPath?: string; partPath?: string }) => {
+          const snapshot = backend.db.getClipTaskById(taskId)
+          const trackedFinal = extra?.finalPath
+            || (['built', 'verified', 'published_cleanup', 'cleanup_pending'].includes(snapshot?.artifact_state || '')
+              ? snapshot?.file_path || ''
+              : '')
+          const trackedPart = extra?.partPath || snapshot?.part_path || ''
+          const artifactIdentity = snapshot?.artifact_identity || ''
+          const partIdentity = snapshot?.part_identity || artifactIdentity
+          backend.db.updateClipTask(taskId, {
+            status: 'cancelling',
+            message: 'Cancelling; cleaning output...',
+            file_path: trackedFinal,
+            part_path: trackedPart,
+            artifact_state: 'cleanup_pending',
+            artifact_identity: artifactIdentity,
+            part_identity: partIdentity,
+          })
+          await backend.db.checkpoint()
+
+          const cleanupResults = new Map<string, 'removed' | 'blocked' | 'foreign'>()
+          for (const candidate of new Set([trackedFinal, trackedPart])) {
+            if (!candidate) continue
+            const resolved = path.isAbsolute(candidate) ? candidate : path.resolve(backend.baseDir, candidate)
+            if (!artifactIdentity) {
+              cleanupResults.set(resolved, 'foreign')
+              continue
+            }
+            try {
+              const expectedIdentity = sameTrackedPath(candidate, trackedPart) ? partIdentity : artifactIdentity
+              await removeFileWithRetry(resolved, { expectedIdentity })
+              cleanupResults.set(resolved, 'removed')
+            } catch (cleanupError) {
+              if ((cleanupError as NodeJS.ErrnoException).code === 'EOWNERSHIP') {
+                cleanupResults.set(resolved, 'foreign')
+                continue
+              }
+              console.error(`[clip] Failed to remove cancelled artifact ${resolved}:`, cleanupError)
+              cleanupResults.set(resolved, 'blocked')
+            }
+          }
+
+          const cleanupResultFor = (candidate: string) => {
+            if (!candidate) return 'removed' as const
+            const resolved = path.isAbsolute(candidate) ? candidate : path.resolve(backend.baseDir, candidate)
+            return cleanupResults.get(resolved) || 'blocked'
+          }
+          const finalResult = cleanupResultFor(trackedFinal)
+          const partResult = cleanupResultFor(trackedPart)
+          const finalRemaining = finalResult === 'removed' ? '' : trackedFinal
+          const partRemaining = partResult === 'removed' ? '' : trackedPart
+          const ownershipConflicts = [
+            finalResult === 'foreign' ? finalRemaining : '',
+            partResult === 'foreign' ? partRemaining : '',
+          ].filter(Boolean)
+          const terminalPatch: Parameters<typeof backend.db.updateClipTask>[1] = !finalRemaining && !partRemaining ? {
+            status: 'error',
+            message: 'Cancelled',
+            file_path: '',
+            part_path: '',
+            artifact_state: '',
+            artifact_identity: '',
+            part_identity: '',
+          } : {
+            status: 'error',
+            message: ownershipConflicts.length > 0
+              ? `Cancelled; a tracked path now belongs to another file and was preserved: ${ownershipConflicts.join('；')}`
+              : `Cancelled; output cleanup is blocked and will retry on next start: ${[finalRemaining, partRemaining].filter(Boolean).join('；')}`,
+            file_path: finalRemaining,
+            part_path: partRemaining,
+            artifact_state: 'cleanup_pending',
+            artifact_identity: artifactIdentity,
+            part_identity: partRemaining ? partIdentity : '',
+          }
+          // Cleanup is now settled (successfully or as durable debt). Commit
+          // the terminal row and remove the cancellation handle in the same
+          // synchronous turn so a repeated request cannot regress `error`
+          // back to `cancelling` while the final checkpoint is in flight.
+          backend.db.updateClipTask(taskId, terminalPatch)
+          if (backend.clipTasksAbort.get(taskId) === controller) backend.clipTasksAbort.delete(taskId)
+          try {
+            await backend.db.checkpoint()
+          } catch (checkpointError) {
+            console.error(`[clip] Failed to checkpoint cancelled task ${taskId}:`, checkpointError)
+          }
+          backend.emitClipTaskUpdate(taskId)
+        }
         try {
           const result = await backend.clipService.executeClip(
             url, title, Number(startTime) || 0, Number(endTime) || 0, Number(audioQualityIndex) || 0, Number(videoQualityIndex) || 0,
             (progress, message) => {
-              if (controller.signal.aborted || backend.clipTasksAbort.get(taskId) !== controller) return
-              backend.db.updateClipTask(taskId, { progress, status: 'processing', message: message || '' })
+              if (cancellationRequested()) return
+              const processingProgress = Math.max(0, Math.min(99, Number(progress) || 0))
+              backend.db.updateClipTask(taskId, { progress: processingProgress, status: 'processing', message: message || '' })
               backend.emitClipTaskUpdate(taskId)
             },
             prefixCut !== false,
@@ -263,20 +294,149 @@ export function registerClipRoutes(backend: DesktopBackend) {
               videoId: Number.isFinite(Number(videoQualityId)) ? Number(videoQualityId) : undefined,
               videoCodec: videoQualityCodec ? String(videoQualityCodec) : undefined,
             },
+            {
+              onReserved: async ({ outPath, partPath, identity }) => persistArtifact({
+                file_path: outPath,
+                part_path: partPath,
+                artifact_state: 'building',
+                artifact_identity: identity || tryReadFileIdentity(partPath),
+                part_identity: identity || tryReadFileIdentity(partPath),
+              }),
+              onBuilt: async ({ outPath, partPath, identity }) => persistArtifact({
+                file_path: outPath,
+                part_path: partPath,
+                artifact_state: 'built',
+                artifact_identity: identity || tryReadFileIdentity(partPath),
+                part_identity: identity || tryReadFileIdentity(partPath),
+              }),
+              onVerified: async ({ outPath, partPath, identity }) => persistArtifact({
+                file_path: outPath,
+                part_path: partPath,
+                artifact_state: 'verified',
+                artifact_identity: identity || tryReadFileIdentity(partPath),
+                part_identity: identity || tryReadFileIdentity(partPath),
+              }),
+              onPublished: async ({ outPath, partPath, identity }) => persistArtifact({
+                file_path: outPath,
+                part_path: partPath,
+                artifact_state: 'published_cleanup',
+                artifact_identity: identity || tryReadFileIdentity(outPath),
+                part_identity: identity || tryReadFileIdentity(partPath),
+              }),
+            },
           )
-          if (controller.signal.aborted || backend.clipTasksAbort.get(taskId) !== controller) return
-          const resultInfo = result as { path: string; message?: string }
-          backend.db.updateClipTask(taskId, {
+          const resultInfo = result as { path: string; workingPath?: string; message?: string; identity?: string }
+          if (cancellationRequested()) {
+            if (backend.isStopping()) return
+            await cleanupCancelledArtifacts({ finalPath: resultInfo.path, partPath: resultInfo.workingPath })
+            return
+          }
+          if (!isUsableClipOutput(resultInfo.path, backend.baseDir)) {
+            throw new Error('Clip output file is missing or empty')
+          }
+          // The current ClipService always returns the identity captured at
+          // publication, but derive it here as a compatibility boundary for a
+          // previously queued/injected service result that predates that
+          // protocol field.  It is captured and checked before any durable
+          // completion state is written.
+          const resultIdentity = resultInfo.identity || tryReadFileIdentity(resultInfo.path)
+          if (!resultIdentity || !fileMatchesIdentity(resultInfo.path, resultIdentity)) {
+            throw Object.assign(
+              new Error('Clip output ownership changed before completion; the path was preserved for safety'),
+              { code: 'EOWNERSHIP', publishedPath: resultInfo.path },
+            )
+          }
+          let retainedWorkingPath = resultInfo.workingPath || ''
+          if (retainedWorkingPath) {
+            const resolvedWorkingPath = path.isAbsolute(retainedWorkingPath)
+              ? retainedWorkingPath
+              : path.resolve(backend.baseDir, retainedWorkingPath)
+            try {
+              await removeFileWithRetry(resolvedWorkingPath, {
+                expectedIdentity: resultIdentity,
+              })
+              retainedWorkingPath = ''
+            } catch (cleanupError) {
+              console.error(`[clip] Published output retained a locked working file ${resolvedWorkingPath}:`, cleanupError)
+            }
+          }
+          if (cancellationRequested()) {
+            if (backend.isStopping()) return
+            await cleanupCancelledArtifacts({ finalPath: resultInfo.path, partPath: retainedWorkingPath })
+            return
+          }
+          const completed = await commitTerminalTask({
             progress: 100,
             status: 'done',
             file_path: resultInfo.path,
-            message: resultInfo.message || '',
+            part_path: retainedWorkingPath,
+            artifact_state: retainedWorkingPath ? 'published_cleanup' : '',
+            artifact_identity: resultIdentity,
+            part_identity: retainedWorkingPath ? resultIdentity : '',
+            message: retainedWorkingPath
+              ? `${resultInfo.message ? `${resultInfo.message}；` : ''}切片已安全保存；临时文件仍被占用，将在下次启动继续清理：${retainedWorkingPath}`
+              : (resultInfo.message || ''),
           })
-          backend.emitClipTaskUpdate(taskId)
+          if (!completed && !backend.isStopping()) {
+            await cleanupCancelledArtifacts({ finalPath: resultInfo.path, partPath: retainedWorkingPath })
+          }
         } catch (error) {
-          if (controller.signal.aborted || backend.clipTasksAbort.get(taskId) !== controller) return
-          backend.db.updateClipTask(taskId, { status: 'error', message: error instanceof Error ? error.message : String(error) })
-          backend.emitClipTaskUpdate(taskId)
+          const fileError = error as { recoverablePath?: unknown; publishedPath?: unknown; cleanupPath?: unknown }
+          const snapshot = backend.db.getClipTaskById(taskId)
+          const durableRetained = snapshot?.artifact_state === 'built'
+            || snapshot?.artifact_state === 'verified'
+            || snapshot?.artifact_state === 'published_cleanup'
+          const recoverablePath = typeof fileError.recoverablePath === 'string' && fileError.recoverablePath
+            ? fileError.recoverablePath
+            : (durableRetained ? snapshot?.part_path || '' : '')
+          const publishedPath = typeof fileError.publishedPath === 'string' && fileError.publishedPath
+            ? fileError.publishedPath
+            : (snapshot?.artifact_state === 'published_cleanup' ? snapshot.file_path : '')
+          const cleanupPath = typeof fileError.cleanupPath === 'string' && fileError.cleanupPath
+            ? fileError.cleanupPath
+            : (snapshot?.artifact_state === 'cleanup_pending' ? snapshot.part_path : '')
+          if (cancellationRequested()) {
+            if (backend.isStopping()) return
+            await cleanupCancelledArtifacts({ finalPath: publishedPath, partPath: recoverablePath || cleanupPath })
+            return
+          }
+          const message = error instanceof Error ? error.message : String(error)
+          const terminalPatch: Parameters<typeof backend.db.updateClipTask>[1] = recoverablePath || publishedPath ? {
+            status: 'error',
+            progress: 99,
+            message: `${message}；完整切片已保留：${recoverablePath || publishedPath}`,
+            // Keep the reserved final path for built/verified debt. link() may
+            // already have succeeded before a transient post-link identity
+            // stat failed; restart recovery can then prove final+part are the
+            // same object and complete the checkpoint without orphaning it.
+            file_path: publishedPath || snapshot?.file_path || '',
+            part_path: recoverablePath,
+            artifact_state: publishedPath
+              ? 'published_cleanup'
+              : snapshot?.artifact_state === 'built' ? 'built' : 'verified',
+            artifact_identity: snapshot?.artifact_identity || '',
+            part_identity: snapshot?.part_identity || snapshot?.artifact_identity || '',
+          } : cleanupPath ? {
+            status: 'error',
+            message: `${message}；临时文件清理将在下次启动重试：${cleanupPath}`,
+            file_path: '',
+            part_path: cleanupPath,
+            artifact_state: 'cleanup_pending',
+            artifact_identity: snapshot?.artifact_identity || '',
+            part_identity: snapshot?.part_identity || snapshot?.artifact_identity || '',
+          } : {
+            status: 'error',
+            message,
+            file_path: '',
+            part_path: '',
+            artifact_state: '',
+            artifact_identity: '',
+            part_identity: '',
+          }
+          const committed = await commitTerminalTask(terminalPatch)
+          if (!committed && !backend.isStopping()) {
+            await cleanupCancelledArtifacts({ finalPath: publishedPath, partPath: recoverablePath || cleanupPath })
+          }
         }
       })
       if (!queued) {
@@ -285,7 +445,7 @@ export function registerClipRoutes(backend: DesktopBackend) {
         res.status(503).json({ error: 'Backend is shutting down', taskId })
         return
       }
-      const currentTask = backend.db.getClipTasks().find(task => task.id === taskId)
+      const currentTask = backend.db.getClipTaskById(taskId)
       res.json({ taskId, status: currentTask?.status || 'pending' })
 
     } catch (error) {
@@ -293,12 +453,17 @@ export function registerClipRoutes(backend: DesktopBackend) {
     }
   })
 
-  backend.app.post('/api/clip/cancel/:taskId', (req: Request, res: Response) => {
-    const taskId = Number(req.params.taskId)
-    if (backend.cancelClipTask(taskId)) {
-      res.json({ ok: true, status: 'error', message: 'Cancelled' })
-    } else {
-      res.status(404).json({ error: 'Task not found or already finished' })
+  backend.app.post('/api/clip/cancel/:taskId', async (req: Request, res: Response) => {
+    try {
+      const taskId = Number(req.params.taskId)
+      if (await backend.cancelClipTask(taskId)) {
+        const task = backend.db.getClipTaskById(taskId)
+        res.json({ ok: true, status: task?.status || 'error', message: task?.message || 'Cancelled', task })
+      } else {
+        res.status(404).json({ error: 'Task not found or already finished' })
+      }
+    } catch (error) {
+      backend.sendError(res, error)
     }
   })
 
@@ -306,16 +471,34 @@ export function registerClipRoutes(backend: DesktopBackend) {
   backend.app.post('/api/clip/open-file', async (req: Request, res: Response) => {
     try {
       const { filePath } = req.body
-      if (!filePath || !fs.existsSync(filePath)) {
+      if (!filePath || typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+        res.status(400).json({ ok: false, message: 'A tracked absolute filePath is required' })
+        return
+      }
+      const resolvedFilePath = path.resolve(filePath)
+      const ownership = trackedArtifactIdentities(resolvedFilePath)
+      if (!ownership.tracked) {
+        res.status(403).json({ ok: false, message: 'The requested path is not tracked by this application' })
+        return
+      }
+      if (!fs.existsSync(resolvedFilePath)) {
         res.status(404).json({ ok: false, message: 'File not found' })
+        return
+      }
+      if (ownership.identities.size === 0) {
+        res.status(409).json({ ok: false, message: 'File ownership has not been verified yet' })
+        return
+      }
+      if (![...ownership.identities].some(identity => fileMatchesIdentity(resolvedFilePath, identity))) {
+        res.status(409).json({ ok: false, message: 'File ownership changed; refusing to open a replacement file' })
         return
       }
       try {
         const { shell } = require('electron')
-        const errorMessage = await shell.openPath(filePath)
+        const errorMessage = await shell.openPath(resolvedFilePath)
         if (errorMessage) throw new Error(errorMessage)
       } catch {
-        await spawnSystemOpener(filePath)
+        await spawnSystemOpener(resolvedFilePath)
       }
       res.json({ ok: true })
     } catch (error) {
@@ -327,16 +510,21 @@ export function registerClipRoutes(backend: DesktopBackend) {
   backend.app.post('/api/clip/open-folder', async (req: Request, res: Response) => {
     try {
       const { filePath } = req.body
-      if (!filePath) {
-        res.status(400).json({ ok: false, message: 'filePath is required' })
+      if (!filePath || typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
+        res.status(400).json({ ok: false, message: 'A tracked absolute filePath is required' })
+        return
+      }
+      const resolvedFilePath = path.resolve(filePath)
+      if (!trackedArtifactIdentities(resolvedFilePath).tracked) {
+        res.status(403).json({ ok: false, message: 'The requested path is not tracked by this application' })
         return
       }
       try {
         const { shell } = require('electron')
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          shell.showItemInFolder(filePath)
+        if (fs.existsSync(resolvedFilePath) && fs.statSync(resolvedFilePath).isFile()) {
+          shell.showItemInFolder(resolvedFilePath)
         } else {
-          const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
+          const dir = fs.existsSync(resolvedFilePath) ? resolvedFilePath : path.dirname(resolvedFilePath)
           if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
             res.status(404).json({ ok: false, message: 'Folder not found' })
             return
@@ -345,9 +533,9 @@ export function registerClipRoutes(backend: DesktopBackend) {
           if (errorMessage) throw new Error(errorMessage)
         }
       } catch {
-        const dir = fs.existsSync(filePath) ? filePath : path.dirname(filePath)
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          await spawnSystemOpener(filePath, true)
+        const dir = fs.existsSync(resolvedFilePath) ? resolvedFilePath : path.dirname(resolvedFilePath)
+        if (fs.existsSync(resolvedFilePath) && fs.statSync(resolvedFilePath).isFile()) {
+          await spawnSystemOpener(resolvedFilePath, true)
         } else {
           if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) {
             res.status(404).json({ ok: false, message: 'Folder not found' })

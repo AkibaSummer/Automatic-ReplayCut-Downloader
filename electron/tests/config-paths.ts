@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
 import YAML from 'yaml'
 
-import { DEFAULT_CONFIG, loadConfigFile, normalizeConfigWithBase, saveConfigFile } from '../src/config'
+import { DEFAULT_CONFIG, loadConfigFile, normalizeConfigWithBase, recoverPortableConfigPaths, saveConfigFile } from '../src/config'
+import { SqliteStore } from '../src/db'
 
 async function main() {
   const baseDir = await mkdtemp(path.join(os.tmpdir(), 'replaycut-config-paths-'))
@@ -48,7 +49,39 @@ async function main() {
     const recovered = loadConfigFile(baseDir, configPath)
     assert.equal(recovered.download.max_concurrent_tasks, 3, 'corrupt primary config should recover from backup')
 
-    console.log('config path regression test passed')
+    const oldBase = path.join(baseDir, 'old-portable')
+    const copiedBase = path.join(baseDir, 'copied-portable')
+    await mkdir(oldBase, { recursive: true })
+    await mkdir(copiedBase, { recursive: true })
+    const oldDbPath = path.join(oldBase, 'replays.db')
+    const copiedDbPath = path.join(copiedBase, 'replays.db')
+    const oldDb = await SqliteStore.open(oldDbPath)
+    oldDb.ensureSchema(oldBase)
+    oldDb.insertReplay({ replay_id: 99, live_key: 'portable-db-proof', title: 'portable', status: 'not_downloaded' })
+    await oldDb.close()
+    await copyFile(oldDbPath, copiedDbPath)
+    const copiedConfigPath = path.join(copiedBase, 'config.yaml')
+    const legacyAbsoluteConfig = normalizeConfigWithBase(oldBase, structuredClone(DEFAULT_CONFIG))
+    await writeFile(copiedConfigPath, YAML.stringify(legacyAbsoluteConfig), 'utf8')
+
+    const relocated = await recoverPortableConfigPaths(
+      copiedBase,
+      copiedConfigPath,
+      loadConfigFile(copiedBase, copiedConfigPath),
+    )
+    assert.equal(relocated.database.dsn, copiedDbPath, 'a copied package must use its copied database, not the old absolute DSN')
+    assert.equal(relocated.download.output_dir, path.join(copiedBase, 'downloads'))
+    assert.equal(relocated.download.temp_dir, path.join(copiedBase, 'temp'))
+    assert.equal(relocated.download.clip_output_dir, path.join(copiedBase, 'clips'))
+    const portableSaved = YAML.parse(await readFile(copiedConfigPath, 'utf8')) as typeof DEFAULT_CONFIG
+    assert.equal(portableSaved.database.dsn, 'replays.db')
+    assert.equal(portableSaved.download.output_dir, 'downloads')
+    const copiedDb = await SqliteStore.open(relocated.database.dsn)
+    copiedDb.ensureSchema(copiedBase)
+    assert.equal(copiedDb.getReplaySummaryByLiveKey(copiedBase, 'portable-db-proof')?.title, 'portable')
+    await copiedDb.close()
+
+    console.log('config path and copied-portable database relocation regression tests passed')
   } finally {
     await rm(baseDir, { recursive: true, force: true })
   }

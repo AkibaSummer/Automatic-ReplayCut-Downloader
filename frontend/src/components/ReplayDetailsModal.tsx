@@ -1,5 +1,5 @@
 import { X, PlayCircle, FolderOpen, Database, Download, PauseCircle, Trash2 } from 'lucide-react'
-import { formatBytes, getErrorMessage } from '../utils'
+import { formatBytes, getErrorMessage, getReplayDisplayStatus, getReplayOutputAvailability, isReplayRelocationPending } from '../utils'
 import { StatusPill } from './index'
 import { useMemo } from 'react'
 import { useAppStore } from '../store'
@@ -41,24 +41,33 @@ export function ReplayDetailsModal({
   if (!selectedReplay) return null
 
   const renderStatus = (r: any) => {
-    switch (r.status) {
+    switch (getReplayDisplayStatus(r.status, r.message, r.output_state)) {
       case 'pending': return <StatusPill label={t('dashboard.statusPending')} tone="neutral" />
       case 'downloading': return <StatusPill label={t('dashboard.statusDownloading')} tone="good" />
       case 'merging': return <StatusPill label={t('dashboard.statusMerging')} tone="good" />
       case 'done':
       case 'completed': return <StatusPill label={t('dashboard.statusDone')} tone="good" />
+      case 'unavailable': return <StatusPill label={t('dashboard.statusUnavailable')} tone="neutral" />
+      case 'ownership_changed': return <StatusPill label={t('dashboard.statusOwnershipChanged')} tone="bad" />
+      case 'unknown': return <StatusPill label={t('common.loading')} tone="neutral" />
       case 'error':
       case 'failed': return <StatusPill label={t('dashboard.statusError')} tone="bad" />
       case 'paused': return <StatusPill label={t('dashboard.statusPaused')} tone="neutral" />
       case 'deleted': return <StatusPill label={t('dashboard.statusDeleted')} tone="neutral" />
+      case 'deleting': return <StatusPill label={t('messages.deleting')} tone="neutral" />
       case 'not_downloaded': return <StatusPill label={t('dashboard.statusNotDownloaded')} tone="neutral" />
       default: return <StatusPill label={r.status} tone="neutral" />
     }
   }
 
   const isDownloading = ['pending', 'downloading', 'merging'].includes(selectedReplay.status)
+  const isDeleting = selectedReplay.status === 'deleting'
+  const isBusy = isDownloading || isDeleting
   const isDone = selectedReplay.status === 'completed' || selectedReplay.status === 'done'
   const isDeleted = selectedReplay.status === 'deleted'
+  const outputAvailability = getReplayOutputAvailability(selectedReplay.message, selectedReplay.output_state)
+  const relocationPending = isReplayRelocationPending(selectedReplay)
+  const canOpenOutput = isDone && !isDeleted && outputAvailability === 'available' && Boolean(selectedReplay.file_path)
   const coverUrl = selectedReplay.local_cover ? buildApiUrl(`/covers/${selectedReplay.local_cover.replace(/^covers[/\\]/, '')}`) : ''
 
   const formatTime = (ts: number) => new Date(ts * 1000).toLocaleString()
@@ -185,7 +194,7 @@ export function ReplayDetailsModal({
                     <span className="text-xs font-medium">No Cover</span>
                   </div>
                 )}
-                {isDone && !isDeleted && (
+                {canOpenOutput && (
                   <button 
                     onClick={handleOpenFile}
                     className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-all flex items-center justify-center opacity-0 group-hover:opacity-100"
@@ -259,7 +268,7 @@ export function ReplayDetailsModal({
 
         <div className="px-6 py-4 border-t bg-slate-50 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            {isDone && !isDeleted && (
+            {canOpenOutput && (
               <>
                 <button
                   disabled={!backendOnline}
@@ -282,9 +291,9 @@ export function ReplayDetailsModal({
           </div>
           
           <div className="flex items-center gap-2">
-            {!isDownloading && !isDone && (
+            {!isBusy && !isDone && (
               <button
-                disabled={!backendOnline || (paused && selectedReplay.status !== 'paused')}
+                disabled={!backendOnline || relocationPending || (paused && selectedReplay.status !== 'paused')}
                 onClick={handleDownload}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-[var(--color-bili-blue)] hover:bg-[#0092c4] rounded-lg shadow-sm hover:shadow transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -304,7 +313,7 @@ export function ReplayDetailsModal({
             )}
             {selectedReplay.status === 'paused' && (
               <button
-                disabled={!backendOnline || paused}
+                disabled={!backendOnline || paused || relocationPending}
                 onClick={handleResume}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-[var(--color-bili-blue)] hover:bg-[#0092c4] rounded-lg shadow-sm hover:shadow transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
@@ -313,7 +322,7 @@ export function ReplayDetailsModal({
               </button>
             )}
             <button
-              disabled={!backendOnline || isDownloading || isDone}
+              disabled={!backendOnline || isBusy || isDone}
               onClick={handleCacheM3u8}
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 hover:border-slate-300 rounded-lg shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               title={t('dashboard.cacheM3u8Tip')}
@@ -322,7 +331,7 @@ export function ReplayDetailsModal({
               {t('dashboard.actionCacheM3u8')}
             </button>
             <button
-              disabled={!backendOnline}
+              disabled={!backendOnline || isDeleting}
               onClick={handleDelete}
               className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-red-600 bg-white border border-red-200 hover:bg-red-50 hover:border-red-300 rounded-lg shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >

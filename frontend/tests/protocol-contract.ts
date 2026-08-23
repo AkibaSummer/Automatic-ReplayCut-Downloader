@@ -3,8 +3,19 @@ import fs from 'node:fs'
 import path from 'node:path'
 
 import { deleteReplayFile, quitDesktopApp, scanReplays } from '../src/api/contracts'
-import { isBackendReachableError, mergeRealtimeProgress, shouldUseRealtimeProgress } from '../src/utils'
-import type { Progress, Replay } from '../src/types'
+import {
+  getClipTaskDisplayStatus,
+  getClipTaskOpenablePath,
+  getReplayDisplayStatus,
+  getReplayOutputAvailability,
+  isBackendReachableError,
+  isReplayRelocationPending,
+  mergeRealtimeProgress,
+  REPLAY_OUTPUT_OWNERSHIP_CHANGED_PREFIX,
+  REPLAY_OUTPUT_UNAVAILABLE_PREFIX,
+  shouldUseRealtimeProgress,
+} from '../src/utils'
+import type { ClipTaskRecord, Progress, Replay } from '../src/types'
 
 const frontendRoot = fs.existsSync(path.join(process.cwd(), 'src', 'locales'))
   ? process.cwd()
@@ -57,6 +68,11 @@ assert.match(fs.readFileSync(path.join(sourceRoot, 'components', 'ReplayDetailsM
 const appSource = fs.readFileSync(path.join(sourceRoot, 'App.tsx'), 'utf8')
 assert.doesNotMatch(appSource, /savingConfig=\{useAppStore\.getState\(\)\.savingConfig\}/)
 assert.doesNotMatch(appSource, /paused=\{useAppStore\.getState\(\)\.paused\}/)
+const appControllerSource = fs.readFileSync(path.join(sourceRoot, 'components', 'AppController.tsx'), 'utf8')
+assert.match(appControllerSource, /startClipTaskPolling\(/, 'clip tasks must periodically reconcile missed websocket events')
+assert.match(appControllerSource, /showTaskCenter\) void fetchClipTasks\(\)/, 'opening task center must refresh canonical state immediately')
+assert.match(appControllerSource, /addEventListener\('focus', refreshOnFocus\)/, 'window focus must re-check externally deleted outputs')
+assert.match(appControllerSource, /scheduleReconnect\(generation\)/, 'websocket heartbeat timeout must have a reconnect fallback')
 const clipPageSource = fs.readFileSync(path.join(sourceRoot, 'ClipPage.tsx'), 'utf8')
 assert.match(
   clipPageSource,
@@ -117,5 +133,86 @@ assert.equal(isBackendReachableError({ response: { status: 500 } }), true, 'HTTP
 assert.equal(isBackendReachableError({ response: { status: 404 } }), true, 'business/route errors must not mark the backend offline')
 assert.equal(isBackendReachableError({ request: {} }), false, 'a request without a response is a connectivity failure')
 assert.equal(isBackendReachableError(new Error('ECONNREFUSED')), false, 'connection failures must mark the backend offline')
+
+assert.equal(
+  getReplayOutputAvailability(`${REPLAY_OUTPUT_UNAVAILABLE_PREFIX} D:\\missing.mp4`),
+  'unavailable',
+  'a retained missing-output path must be rendered as unavailable',
+)
+assert.equal(
+  getReplayDisplayStatus('completed', `${REPLAY_OUTPUT_OWNERSHIP_CHANGED_PREFIX} D:\\foreign.mp4`),
+  'ownership_changed',
+  'a replacement at a retained completed path must not be rendered as completed',
+)
+assert.equal(
+  getReplayDisplayStatus('completed', 'Download completed'),
+  'completed',
+  'ordinary completed outputs must keep their completed display state',
+)
+assert.equal(
+  getReplayDisplayStatus('completed', 'stale text must not control protocol', 'ownership_changed'),
+  'ownership_changed',
+  'the explicit backend output_state must take precedence over display text',
+)
+assert.equal(
+  getReplayDisplayStatus('completed', 'portable relocation is incomplete', 'unknown'),
+  'unknown',
+  'a copied-package replay must not expose its retained path until relocation is verified',
+)
+assert.equal(
+  getReplayDisplayStatus('failed', `${REPLAY_OUTPUT_UNAVAILABLE_PREFIX} D:\\missing.mp4`),
+  'failed',
+  'output availability metadata must not override a non-completed replay state',
+)
+
+const clipProtocolFixture = {
+  status: 'done',
+  message: '',
+  file_path: 'D:\\clips\\owned.mp4',
+  part_path: '',
+  artifact_state: '',
+  output_state: 'unknown',
+} as ClipTaskRecord
+assert.equal(getClipTaskDisplayStatus(clipProtocolFixture), 'unknown')
+assert.equal(getClipTaskOpenablePath(clipProtocolFixture), '', 'an unverified completed clip must not expose an open action')
+assert.equal(
+  getClipTaskOpenablePath({ ...clipProtocolFixture, output_state: 'available' }),
+  clipProtocolFixture.file_path,
+  'an explicitly available completed clip may expose its owned final path',
+)
+assert.equal(
+  getClipTaskOpenablePath({
+    ...clipProtocolFixture,
+    status: 'error',
+    file_path: 'D:\\clips\\reserved.mp4',
+    part_path: 'D:\\clips\\verified.part.mp4',
+    artifact_state: 'verified',
+    output_state: 'available',
+  }),
+  'D:\\clips\\verified.part.mp4',
+  'a verified recovery artifact must open the owned working path, not the unverified reserved final name',
+)
+assert.equal(isReplayRelocationPending({ portable_relocation_pending: true }), true)
+assert.equal(isReplayRelocationPending({}), false)
+
+const dashboardSource = fs.readFileSync(path.join(sourceRoot, 'components', 'Dashboard.tsx'), 'utf8')
+const replayDetailsSource = fs.readFileSync(path.join(sourceRoot, 'components', 'ReplayDetailsModal.tsx'), 'utf8')
+assert.match(dashboardSource, /getReplayDisplayStatus\(rawDisplayStatus, r\.message, r\.output_state\)/)
+assert.match(
+  dashboardSource,
+  /r\.file_path && displayStatus === 'completed'/,
+  'dashboard file-opening controls must use the derived display status',
+)
+assert.match(replayDetailsSource, /const canOpenOutput = .*outputAvailability === 'available'/)
+assert.match(appSource, /getClipTaskDisplayStatus\(task\)/, 'the task center must derive clip completion from output_state')
+assert.match(clipPageSource, /getClipTaskOpenablePath\(task\)/, 'per-video clip controls must require an explicitly available path')
+assert.match(dashboardSource, /paused \|\| relocationPending/, 'dashboard replay actions must block unresolved relocation debt')
+assert.match(replayDetailsSource, /paused \|\| relocationPending/, 'replay details resume must block unresolved relocation debt')
+assert.match(appControllerSource, /data\.type === 'state_reconciled'/, 'startup reconciliation must trigger a canonical replay refresh')
+assert.equal(
+  Array.from(replayDetailsSource.matchAll(/\{canOpenOutput && \(/g)).length,
+  2,
+  'both the cover overlay and footer file-opening controls must require an owned output',
+)
 
 console.log('frontend protocol contract: ok')

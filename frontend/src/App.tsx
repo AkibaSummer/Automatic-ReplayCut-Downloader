@@ -10,7 +10,7 @@ import { ClipPage } from './ClipPage'
 import { SettingsPage } from './SettingsPage'
 import { useAppStore } from './store'
 import { useShallow } from 'zustand/react/shallow'
-import { getErrorMessage, isBackendReachableError } from './utils'
+import { getClipTaskDisplayStatus, getErrorMessage, isBackendReachableError, shouldUseRealtimeProgress } from './utils'
 import { quitDesktopApp, scanReplays } from './api/contracts'
 import { FileText, FolderOpen, X } from 'lucide-react'
 import { StatusPill } from './components/index'
@@ -36,6 +36,14 @@ function App() {
     showToast: state.showToast, replaceToast: state.replaceToast
   })))
 
+  // ClipPage owns relatively expensive media resources. Do not mount it while
+  // the app is opening on the downloads page; keep it alive only after the
+  // user has visited the clip page so an in-progress edit survives navigation.
+  const [clipPageMounted, setClipPageMounted] = React.useState(page === 'clip')
+  React.useEffect(() => {
+    if (page === 'clip') setClipPageMounted(true)
+  }, [page])
+
   const fetchReplays = async (opts?: { notify?: boolean }) => {
     if (!useAppStore.getState().apiBase) return
     if (opts?.notify) setIsRefreshing(true)
@@ -48,6 +56,11 @@ function App() {
         const next = { ...prev }
         for (const liveKey of Object.keys(next)) {
           if (!liveKeys.has(liveKey)) delete next[liveKey]
+        }
+        for (const replay of list) {
+          if (!shouldUseRealtimeProgress(next[replay.live_key], replay)) {
+            delete next[replay.live_key]
+          }
         }
         return next
       })
@@ -99,6 +112,7 @@ function App() {
         updated_records: raw.updated_records ?? raw.updated ?? 0,
         covers_updated: raw.covers_updated ?? 0,
         marked_deleted: raw.marked_deleted ?? 0,
+        unavailable_outputs: raw.unavailable_outputs ?? 0,
         already_up_to_date: raw.already_up_to_date ?? 0,
       }
       setBackendOnline(true)
@@ -213,9 +227,11 @@ function App() {
               />
             )}
 
-            <div style={{ display: page === 'clip' ? undefined : 'none' }}>
-              <ClipPage apiClient={apiClient} apiBase={apiBase} showToast={showToast} t={t} clipTasks={clipTasks} />
-            </div>
+            {clipPageMounted && (
+              <div style={{ display: page === 'clip' ? undefined : 'none' }}>
+                <ClipPage apiClient={apiClient} apiBase={apiBase} showToast={showToast} t={t} clipTasks={clipTasks} />
+              </div>
+            )}
           </div>
         </main>
       </div>
@@ -263,20 +279,29 @@ function App() {
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
               {clipTasks.length === 0 ? (
                 <div className="text-center text-slate-400 mt-10">{t('clipTask.empty')}</div>
-              ) : clipTasks.map(task => (
+              ) : clipTasks.map(task => {
+                const displayStatus = getClipTaskDisplayStatus(task)
+                const displayLabel = displayStatus === 'unknown'
+                  ? t('common.loading')
+                  : displayStatus === 'unavailable'
+                    ? t('dashboard.statusUnavailable')
+                    : displayStatus === 'ownership_changed'
+                      ? t('dashboard.statusOwnershipChanged')
+                      : displayStatus.toUpperCase()
+                return (
                 <div key={task.id} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
                   <div className="flex justify-between items-start mb-2">
                     <div className="font-medium text-slate-900 truncate pr-2">{task.title}</div>
                     <StatusPill 
-                      label={task.status.toUpperCase()} 
-                      tone={task.status === 'done' ? 'good' : task.status === 'error' ? 'bad' : 'neutral'} 
+                      label={displayLabel}
+                      tone={displayStatus === 'done' ? 'good' : displayStatus === 'error' || displayStatus === 'ownership_changed' ? 'bad' : 'neutral'}
                     />
                   </div>
                   <div className="text-xs text-slate-500 mb-3">
                     {new Date(task.created_at).toLocaleString()}
                   </div>
                   
-                  {(task.status === 'processing' || task.status === 'pending') && (
+                  {['processing', 'pending', 'cancelling'].includes(task.status) && (
                     <div>
                       <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
                         <div
@@ -291,7 +316,7 @@ function App() {
                     </div>
                   )}
 
-                  {task.status === 'done' && (
+                  {displayStatus === 'done' && (
                     <div className="mt-2">
                       {task.message && <div className="text-xs text-green-700 mb-1.5">{task.message}</div>}
                       <div className="text-xs text-green-600 bg-green-50 p-2 rounded truncate mb-2" title={task.file_path}>
@@ -322,7 +347,8 @@ function App() {
                     </div>
                   )}
                 </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         </div>

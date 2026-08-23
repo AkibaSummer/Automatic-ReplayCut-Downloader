@@ -37,6 +37,11 @@ export type ReplayRecord = {
   end_time: number
   duration: number
   file_path: string
+  recoverable_part_path: string
+  recoverable_state: '' | 'merge_in_progress' | 'complete_unverified' | 'verified' | 'published_cleanup'
+  cleanup_part_path: string
+  output_identity: string
+  cleanup_part_identity: string
   cover_url: string
   local_cover: string
   file_size: number
@@ -48,6 +53,8 @@ export type ReplayRecord = {
   eta: string
   status: string
   message: string
+  output_state?: 'available' | 'unavailable' | 'ownership_changed' | 'unknown' | 'not_applicable'
+  portable_relocation_pending?: boolean
   verify_ok: boolean
   actual_duration: number
   streams: StreamSlice[]
@@ -63,6 +70,11 @@ export type ReplayPatch = Partial<
     | 'elapsed'
     | 'eta'
     | 'file_path'
+    | 'recoverable_part_path'
+    | 'recoverable_state'
+    | 'cleanup_part_path'
+    | 'output_identity'
+    | 'cleanup_part_identity'
     | 'file_size'
     | 'resolution'
     | 'bitrate'
@@ -105,6 +117,7 @@ export type ScanSummary = {
   updated_records: number
   covers_updated: number
   marked_deleted: number
+  unavailable_outputs: number
   already_up_to_date: number
 }
 
@@ -147,7 +160,13 @@ export type ClipTaskRecord = {
   start_time: number
   end_time: number
   file_path: string
+  part_path: string
+  artifact_state: '' | 'building' | 'built' | 'verified' | 'published_cleanup' | 'cleanup_pending'
+  artifact_identity: string
+  part_identity: string
+  portable_relocation_pending: boolean
+  output_state?: 'available' | 'unavailable' | 'ownership_changed' | 'unknown' | 'not_applicable'
   progress: number
-  status: 'pending' | 'processing' | 'done' | 'error'
+  status: 'pending' | 'processing' | 'cancelling' | 'done' | 'error'
   message: string
 }

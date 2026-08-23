@@ -47,6 +47,9 @@ export function Sidebar({
     paused_tasks: 0,
     failed_tasks: 0,
   }
+  const streamCleanupBlocked = runtimeSnapshot.downloading_tasks > 0
+    || runtimeSnapshot.queued_tasks > 0
+    || clipTasks.some(task => ['pending', 'processing', 'cancelling'].includes(task.status))
 
   const toastAction = async (opts: { loadingTitle: string; loadingMessage?: string; successTitle: string; successMessage?: string; errorTitle: string; action: () => Promise<any> }) => {
     const toastId = showToast({ tone: 'loading', title: opts.loadingTitle, message: opts.loadingMessage })
@@ -77,7 +80,16 @@ export function Sidebar({
     try {
       const res = await apiClient.post('/api/cleanup-streams')
       const count = res.data?.count ?? 0
-      replaceToast(toastId, { tone: 'success', title: t('messages.cleanSuccess'), message: t('messages.cleanStreamsCount', { count }) })
+      replaceToast(toastId, {
+        tone: 'success',
+        title: t('messages.cleanSuccess'),
+        message: t('messages.cleanStreamsCount', {
+          count,
+          before: formatBytes(Number(res.data?.before_file_bytes) || 0),
+          after: formatBytes(Number(res.data?.after_file_bytes) || 0),
+          reclaimed: formatBytes(Number(res.data?.reclaimed_file_bytes) || 0),
+        }),
+      })
       await fetchReplays({ notify: false })
     } catch (e) {
       replaceToast(toastId, { tone: 'error', title: t('messages.cleanFailed'), message: getErrorMessage(e) })
@@ -153,7 +165,7 @@ export function Sidebar({
           >
             <Download className="w-5 h-5 mr-3" />
             {t('clipTask.center')}
-            {clipTasks.filter(t => t.status === 'processing' || t.status === 'pending').length > 0 && (
+            {clipTasks.filter(t => ['pending', 'processing', 'cancelling'].includes(t.status)).length > 0 && (
               <span className="ml-auto flex h-2 w-2 relative">
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[var(--color-bili-pink)] opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-[var(--color-bili-pink)]"></span>
@@ -276,7 +288,8 @@ export function Sidebar({
           </button>
           <button
             onClick={handleCleanupStreams}
-            disabled={!backendOnline}
+            disabled={!backendOnline || streamCleanupBlocked}
+            title={streamCleanupBlocked ? t('dashboard.cleanStreamsBusyTip') : t('dashboard.cleanStreamsTip')}
             className="w-full flex items-center justify-center px-3 py-2 bg-white border border-slate-300 text-sm font-medium rounded-lg hover:bg-slate-50 transition disabled:opacity-50"
           >
             <Eraser className="w-4 h-4 mr-2" />

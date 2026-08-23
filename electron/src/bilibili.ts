@@ -1,6 +1,7 @@
 import { AppConfig, ReplayRecord, StreamSlice } from './types'
 import { safeNumber } from './utils'
 import { SqliteStore } from './db'
+import fsp from 'node:fs/promises'
 
 export const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
@@ -17,7 +18,7 @@ export class BilibiliClient {
     this.customFetch = customFetch || globalThis.fetch
   }
 
-  public loadCookies() {
+  public async loadCookies(signal?: AbortSignal) {
     const fromConfig = this.config.bilibili.cookies || {}
     for (const [key, value] of Object.entries(fromConfig)) {
       this.cookies.set(key, value)
@@ -25,15 +26,13 @@ export class BilibiliClient {
     const cookieFile = this.config.bilibili.cookie_file
     if (!cookieFile) return
     try {
-      // Avoid fs here if possible, assume it's loaded in main and passed, or just read it
-      const fs = require('node:fs')
-      if (fs.existsSync(cookieFile)) {
-        const parsed = JSON.parse(fs.readFileSync(cookieFile, 'utf8')) as Record<string, string>
-        for (const [key, value] of Object.entries(parsed)) {
-          this.cookies.set(key, value)
-        }
+      const parsed = JSON.parse(await fsp.readFile(cookieFile, { encoding: 'utf8', signal })) as Record<string, string>
+      signal?.throwIfAborted()
+      for (const [key, value] of Object.entries(parsed)) {
+        this.cookies.set(key, value)
       }
-    } catch {
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') throw error
       // Ignore
     }
   }
@@ -242,7 +241,10 @@ export class BilibiliClient {
     return null
   }
 
-  public async cacheReplayM3U8(replay: ReplayRecord, signal?: AbortSignal) {
+  public async cacheReplayM3U8(
+    replay: Pick<ReplayRecord, 'live_key' | 'replay_id' | 'start_time' | 'end_time'>,
+    signal?: AbortSignal,
+  ) {
     signal?.throwIfAborted()
     const params = new URLSearchParams({
       live_key: replay.live_key,
@@ -299,5 +301,6 @@ export class BilibiliClient {
         insert.run(now, now, row.replay_id, row.start_time, row.end_time, row.stream, row.type, row.m3u8_text)
       }
     })
+    this.db.flushSoon()
   }
 }

@@ -7,8 +7,21 @@ import path from 'node:path'
 import WebSocket from 'ws'
 
 import { DesktopBackend } from '../src/backend'
+import { REPLAY_TEMP_SENTINEL, replayTempSentinelContent, tryReadFileIdentity } from '../src/utils'
 
 type JsonObject = Record<string, any>
+
+function assertPublicReplayHasNoStreams(replay: JsonObject, marker: string, label: string) {
+  const serialized = JSON.stringify(replay)
+  assert.equal(serialized.includes(marker), false, `${label} must not expose cached M3U8 content`)
+  assert.equal(serialized.includes('"m3u8_text"'), false, `${label} must not expose the M3U8 field`)
+  assert.equal(serialized.includes('"m3_u8_text"'), false, `${label} must not expose the database M3U8 field`)
+  assert.equal(
+    replay.streams === undefined || (Array.isArray(replay.streams) && replay.streams.length === 0),
+    true,
+    `${label} must omit streams or return an empty stream list`,
+  )
+}
 
 function waitForMessage(ws: WebSocket, predicate: (message: JsonObject) => boolean, label: string) {
   return new Promise<JsonObject>((resolve, reject) => {
@@ -70,6 +83,7 @@ async function main() {
     backend.config.bilibili.anchor_id = 123
     backend.config.download.max_concurrent_tasks = 1
     const baseURL = await backend.listen()
+    await backend.waitForStartupReconciliation()
     const wsURL = `${baseURL.replace(/^http/, 'ws')}/ws`
 
     const evil = await fetch(`${baseURL}/api/health`, { headers: { Origin: 'https://evil.example' } })
@@ -126,6 +140,20 @@ async function main() {
       replay_id: 21, live_key: 'missing-file', title: 'missing', status: 'completed',
       file_path: 'relative-missing.mp4', file_size: 7,
     })
+    await writeFile(path.join(baseDir, 'empty-replay.mp4'), '')
+    backend.db.insertReplay({
+      replay_id: 22, live_key: 'empty-file', title: 'empty', status: 'completed',
+      file_path: 'empty-replay.mp4', file_size: 7,
+    })
+    backend.db.insertReplay({
+      replay_id: 23, live_key: 'empty-path', title: 'empty path', status: 'completed',
+      file_path: '', file_size: 7,
+    })
+    assert.equal(
+      backend.db.getReplayByLiveKey(baseDir, 'empty-path')?.output_state,
+      'unavailable',
+      'an inconsistent completed row without a path must never be reported as available',
+    )
     ;(backend.bilibiliClient as any).fetchJSON = async () => ({
       code: 0,
       message: '',
@@ -154,7 +182,8 @@ async function main() {
       new_records: 0,
       updated_records: 1,
       covers_updated: 1,
-      marked_deleted: 1,
+      marked_deleted: 0,
+      unavailable_outputs: 3,
       already_up_to_date: 0,
     })
     const metadata = backend.db.getReplayByLiveKey(baseDir, 'metadata')!
@@ -178,7 +207,18 @@ async function main() {
       local_cover: 'new.jpg',
     })
     assert.equal(backend.db.getReplayByLiveKey(baseDir, 'relative-file')?.status, 'completed')
-    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'missing-file')?.status, 'deleted')
+    const missingReplay = backend.db.getReplayByLiveKey(baseDir, 'missing-file')!
+    assert.equal(missingReplay.status, 'completed')
+    assert.equal(missingReplay.file_path, path.join(baseDir, 'relative-missing.mp4'))
+    assert.match(missingReplay.message, /ownership path retained/)
+    const emptyReplay = backend.db.getReplayByLiveKey(baseDir, 'empty-file')!
+    assert.equal(emptyReplay.status, 'completed')
+    assert.equal(emptyReplay.file_path, path.join(baseDir, 'empty-replay.mp4'))
+    assert.match(emptyReplay.message, /ownership path retained/)
+    const emptyPathReplay = backend.db.getReplayByLiveKey(baseDir, 'empty-path')
+    assert.equal(emptyPathReplay?.status, 'not_downloaded')
+    assert.equal(emptyPathReplay?.output_state, 'not_applicable')
+    assert.match(emptyPathReplay?.message || '', /ready to download again/i)
     const secondScan = await fetch(`${baseURL}/api/scan`, { method: 'POST' })
     assert.deepEqual(await secondScan.json(), {
       fetched: 1,
@@ -186,8 +226,103 @@ async function main() {
       updated_records: 0,
       covers_updated: 0,
       marked_deleted: 0,
+      unavailable_outputs: 2,
       already_up_to_date: 1,
     })
+
+    const privateM3U8Marker = 'PRIVATE_M3U8_PAYLOAD_MUST_NEVER_LEAK'
+    const privateM3U8Text = `#EXTM3U\n#EXTINF:10,\n${privateM3U8Marker.repeat(16_000)}\nfixture.ts`
+    backend.db.insertReplay({
+      replay_id: 24,
+      live_key: 'payload-guard',
+      title: 'payload guard',
+      start_time: 1,
+      end_time: 11,
+      duration: 10,
+      status: 'not_downloaded',
+    })
+    const now = new Date().toISOString()
+    const insertPrivateStream = backend.db.prepare(
+      `INSERT INTO stream_slices
+       (created_at, updated_at, replay_id, start_time, end_time, stream, type, m3_u8_text)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    insertPrivateStream.run(now, now, 24, 1, 11, 'https://private.invalid/replay.m3u8', 0, privateM3U8Text)
+
+    const replayListResponse = await fetch(`${baseURL}/api/replays`)
+    assert.equal(replayListResponse.status, 200)
+    const replayListText = await replayListResponse.text()
+    assert.equal(replayListText.includes(privateM3U8Marker), false, 'replay list must not expose cached M3U8 content')
+    assert.equal(replayListText.includes('"m3u8_text"'), false, 'replay list must not expose the M3U8 field')
+    assert.equal(replayListText.includes('"m3_u8_text"'), false, 'replay list must not expose the database M3U8 field')
+    assert.ok(Buffer.byteLength(replayListText) < 128 * 1024, 'replay list response must remain compact')
+    const replayList = JSON.parse(replayListText) as JsonObject[]
+    const publicPayloadGuard = replayList.find(replay => replay.live_key === 'payload-guard')
+    assert.ok(publicPayloadGuard)
+    assertPublicReplayHasNoStreams(publicPayloadGuard, privateM3U8Marker, 'replay list item')
+    assert.equal(
+      backend.db.getReplayByLiveKey(baseDir, 'payload-guard')?.streams[0]?.m3u8_text.includes(privateM3U8Marker),
+      true,
+      'the private downloader record must retain its cached M3U8 content',
+    )
+
+    ;(backend.bilibiliClient as any).cacheReplayM3U8 = async (replay: JsonObject) => {
+      assert.equal(replay.live_key, 'payload-guard')
+      assertPublicReplayHasNoStreams(replay, privateM3U8Marker, 'cache-m3u8 input metadata')
+    }
+    const cacheResponse = await fetch(`${baseURL}/api/replays/payload-guard/cache-m3u8`, { method: 'POST' })
+    assert.equal(cacheResponse.status, 200)
+    const cacheText = await cacheResponse.text()
+    assert.ok(Buffer.byteLength(cacheText) < 32 * 1024, 'cache-m3u8 response must remain compact')
+    const cachedPublicReplay = JSON.parse(cacheText) as JsonObject
+    assertPublicReplayHasNoStreams(cachedPublicReplay, privateM3U8Marker, 'cache-m3u8 response')
+
+    backend.db.insertReplay({
+      replay_id: 26,
+      live_key: 'portable-relocation-blocked',
+      title: 'portable relocation blocked',
+      status: 'paused',
+    })
+    assert.equal(backend.db.setReplayPortableRelocationPending('portable-relocation-blocked', true), true)
+    backend.pausedTasks.add('portable-relocation-blocked')
+    const portableListResponse = await fetch(`${baseURL}/api/replays`)
+    const portableList = await portableListResponse.json() as JsonObject[]
+    assert.equal(
+      portableList.find(replay => replay.live_key === 'portable-relocation-blocked')?.portable_relocation_pending,
+      true,
+      'the public replay protocol must expose unresolved portable relocation debt',
+    )
+    const blockedResume = await fetch(`${baseURL}/api/replays/portable-relocation-blocked/resume`, { method: 'POST' })
+    assert.equal(blockedResume.status, 409)
+    assert.equal(backend.pausedTasks.has('portable-relocation-blocked'), true)
+    assert.equal(backend.db.getReplaySummaryByLiveKey(baseDir, 'portable-relocation-blocked')?.status, 'paused')
+    const blockedDownload = await fetch(`${baseURL}/api/replays/portable-relocation-blocked/download`, { method: 'POST' })
+    assert.equal(blockedDownload.status, 409)
+    assert.equal(backend.pausedTasks.has('portable-relocation-blocked'), true, 'failed download alias must not clear pause')
+    assert.equal(backend.queue.includes('portable-relocation-blocked'), false)
+
+    backend.db.insertReplay({ replay_id: 27, live_key: 'cache-lock', title: 'cache lock', status: 'not_downloaded' })
+    let markCacheLockStarted: (() => void) | undefined
+    let releaseCacheLock: (() => void) | undefined
+    const cacheLockStarted = new Promise<void>(resolve => { markCacheLockStarted = resolve })
+    const cacheLockGate = new Promise<void>(resolve => { releaseCacheLock = resolve })
+    ;(backend.bilibiliClient as any).cacheReplayM3U8 = async (replay: JsonObject) => {
+      assert.equal(replay.live_key, 'cache-lock')
+      markCacheLockStarted?.()
+      await cacheLockGate
+    }
+    const cacheLockRequest = fetch(`${baseURL}/api/replays/cache-lock/cache-m3u8`, { method: 'POST' })
+    await cacheLockStarted
+    assert.equal(backend.cachingReplays.has('cache-lock'), true)
+    const duplicateCache = await fetch(`${baseURL}/api/replays/cache-lock/cache-m3u8`, { method: 'POST' })
+    assert.equal(duplicateCache.status, 409)
+    const downloadDuringCache = await fetch(`${baseURL}/api/replays/cache-lock/download`, { method: 'POST' })
+    assert.equal(downloadDuringCache.status, 409)
+    const deleteDuringCache = await fetch(`${baseURL}/api/replays/cache-lock/delete-file`, { method: 'POST' })
+    assert.equal(deleteDuringCache.status, 409)
+    releaseCacheLock?.()
+    assert.equal((await cacheLockRequest).status, 200)
+    assert.equal(backend.cachingReplays.has('cache-lock'), false)
 
     backend.db.insertReplay({ replay_id: 28, live_key: 'slot-blocker', title: 'blocker', status: 'not_downloaded' })
     backend.db.insertReplay({ replay_id: 29, live_key: 'queued-cache', title: 'queued cache', status: 'not_downloaded' })
@@ -238,17 +373,31 @@ async function main() {
     await waitUntil(() => !backend!.activeTasks.has('failure'), 'failed generation cleanup')
 
     const deleteTarget = path.join(backend.config.download.output_dir, 'delete-me.mp4')
-    await writeFile(deleteTarget, 'delete fixture')
+    const recoverableDeleteTarget = path.join(backend.config.download.output_dir, 'delete-me.part.mp4')
+    const cleanupDeleteTarget = path.join(backend.config.download.output_dir, 'delete-me.partial.mp4')
+    await writeFile(recoverableDeleteTarget, 'recoverable delete fixture')
+    await fs.promises.link(recoverableDeleteTarget, deleteTarget)
+    await writeFile(cleanupDeleteTarget, 'cleanup delete fixture')
     backend.db.insertReplay({
       replay_id: 31, live_key: 'delete', title: 'delete', status: 'not_downloaded',
-      file_path: deleteTarget, file_size: 14,
+      file_path: '', recoverable_part_path: recoverableDeleteTarget,
+      cleanup_part_path: cleanupDeleteTarget,
+      output_identity: tryReadFileIdentity(recoverableDeleteTarget),
+      cleanup_part_identity: tryReadFileIdentity(cleanupDeleteTarget),
+      file_size: 26,
     })
-    const ownedTemp = path.join(backend.config.download.temp_dir, 'delete_stream0')
-    const collidingTemp = path.join(backend.config.download.temp_dir, 'delete_stream_other_stream0')
+    insertPrivateStream.run(now, now, 31, 1, 11, 'https://private.invalid/delete.m3u8', 0, privateM3U8Text)
+    const ownedTemp = path.join(backend.config.download.temp_dir, 'replay-Ab12Z9')
+    const collidingTemp = path.join(backend.config.download.temp_dir, 'replay-Ab12Z9-user-data')
     await mkdir(ownedTemp, { recursive: true })
+    await writeFile(path.join(ownedTemp, REPLAY_TEMP_SENTINEL), replayTempSentinelContent('delete', 0))
     await mkdir(collidingTemp, { recursive: true })
     let markDeleteStarted: (() => void) | undefined
     const deleteStarted = new Promise<void>(resolve => { markDeleteStarted = resolve })
+    let markDeleteAbortObserved: (() => void) | undefined
+    let releaseDeleteAbort: (() => void) | undefined
+    const deleteAbortObserved = new Promise<void>(resolve => { markDeleteAbortObserved = resolve })
+    const deleteAbortGate = new Promise<void>(resolve => { releaseDeleteAbort = resolve })
     let staleWriteAccepted: boolean | undefined
     ;(backend.downloaderService as any).processReplayTask = (
       liveKey: string,
@@ -256,12 +405,13 @@ async function main() {
     ) => new Promise<void>(resolve => {
       markDeleteStarted?.()
       signal.addEventListener('abort', () => {
-        setTimeout(() => {
+        markDeleteAbortObserved?.()
+        void deleteAbortGate.then(() => {
           staleWriteAccepted = backend!.db.patchReplayIfStatus(liveKey, ['pending', 'downloading', 'merging'], {
             status: 'completed', file_path: deleteTarget, progress: 100,
           })
           resolve()
-        }, 30)
+        })
       }, { once: true })
     })
     const queueDelete = await fetch(`${baseURL}/api/replays/delete/download`, { method: 'POST' })
@@ -270,16 +420,232 @@ async function main() {
     const busyCache = await fetch(`${baseURL}/api/replays/delete/cache-m3u8`, { method: 'POST' })
     assert.equal(busyCache.status, 409)
     const deletedUpdate = waitForMessage(ws, message => message.live_key === 'delete' && message.status === 'deleted', 'deleted replay update')
-    const deleteResponse = await fetch(`${baseURL}/api/replays/delete/delete-file`, { method: 'POST' })
+    const deleteRequest = fetch(`${baseURL}/api/replays/delete/delete-file`, { method: 'POST' })
+    await deleteAbortObserved
+    assert.equal(
+      backend.db.getReplayByLiveKey(baseDir, 'delete')?.status,
+      'deleting',
+      'active deletion must expose its real busy state while the downloader winds down',
+    )
+    assert.equal((await fetch(`${baseURL}/api/replays/delete/pause`, { method: 'POST' })).status, 409)
+    assert.equal((await fetch(`${baseURL}/api/replays/delete/resume`, { method: 'POST' })).status, 409)
+    assert.equal((await fetch(`${baseURL}/api/replays/delete/download`, { method: 'POST' })).status, 409)
+    assert.equal((await fetch(`${baseURL}/api/replays/delete/delete-file`, { method: 'POST' })).status, 409)
+    releaseDeleteAbort?.()
+    const deleteResponse = await deleteRequest
     assert.equal(deleteResponse.status, 200)
-    const deleted = await deleteResponse.json() as JsonObject
+    const deleteText = await deleteResponse.text()
+    assert.ok(Buffer.byteLength(deleteText) < 32 * 1024, 'delete-file response must remain compact')
+    const deleted = JSON.parse(deleteText) as JsonObject
+    assertPublicReplayHasNoStreams(deleted, privateM3U8Marker, 'delete-file response')
     assert.equal(deleted.status, 'deleted')
     assert.equal((await deletedUpdate).status, 'deleted')
     assert.equal(staleWriteAccepted, false)
     assert.equal(fs.existsSync(deleteTarget), false)
+    assert.equal(fs.existsSync(recoverableDeleteTarget), false)
+    assert.equal(fs.existsSync(cleanupDeleteTarget), false)
     assert.equal(fs.existsSync(ownedTemp), false)
     assert.equal(fs.existsSync(collidingTemp), true)
     assert.equal(backend.db.getReplayByLiveKey(baseDir, 'delete')?.status, 'deleted')
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'delete')?.recoverable_part_path, '')
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'delete')?.cleanup_part_path, '')
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'delete')?.streams.length, 0)
+
+    const foreignPart = path.join(backend.config.download.output_dir, 'foreign-preserve.part.mp4')
+    const foreignFinal = path.join(backend.config.download.output_dir, 'foreign-preserve.mp4')
+    await writeFile(foreignPart, 'owned recoverable part')
+    await writeFile(foreignFinal, 'foreign replacement')
+    const foreignPartStat = fs.statSync(foreignPart)
+    const foreignFinalStat = fs.statSync(foreignFinal)
+    assert.equal(
+      foreignPartStat.dev !== foreignFinalStat.dev || foreignPartStat.ino !== foreignFinalStat.ino,
+      true,
+      'fixture final must have a different filesystem identity from the recoverable part',
+    )
+    backend.db.insertReplay({
+      replay_id: 33,
+      live_key: 'foreign-preserve',
+      title: 'foreign preserve',
+      status: 'failed',
+      file_path: process.platform === 'win32' ? foreignFinal.toUpperCase() : foreignFinal,
+      recoverable_part_path: foreignPart,
+      output_identity: tryReadFileIdentity(foreignPart),
+    })
+    const foreignDeleteResponse = await fetch(`${baseURL}/api/replays/foreign-preserve/delete-file`, { method: 'POST' })
+    assert.equal(foreignDeleteResponse.status, 200)
+    assert.equal((await foreignDeleteResponse.json() as JsonObject).status, 'deleted')
+    assert.equal(fs.existsSync(foreignPart), false, 'the owned recoverable part must be deleted')
+    assert.equal(fs.existsSync(foreignFinal), true, 'a same-name final with a different identity must be preserved')
+    assert.equal(fs.readFileSync(foreignFinal, 'utf8'), 'foreign replacement')
+
+    const blockedCleanupTarget = path.join(backend.config.download.output_dir, 'blocked-cleanup.part.mp4')
+    await writeFile(blockedCleanupTarget, 'cleanup must remain after failure')
+    backend.db.insertReplay({
+      replay_id: 34,
+      live_key: 'cleanup-failure',
+      title: 'cleanup failure',
+      status: 'failed',
+      cleanup_part_path: blockedCleanupTarget,
+      cleanup_part_identity: tryReadFileIdentity(blockedCleanupTarget),
+    })
+    const originalRename = fs.promises.rename
+    ;(fs.promises as any).rename = async (source: string, destination: string) => {
+      if (path.resolve(String(source)) === path.resolve(blockedCleanupTarget)) {
+        throw Object.assign(new Error('simulated cleanup failure'), { code: 'EIO' })
+      }
+      return originalRename(source, destination)
+    }
+    let failedCleanupResponse: Response
+    try {
+      failedCleanupResponse = await fetch(`${baseURL}/api/replays/cleanup-failure/delete-file`, { method: 'POST' })
+    } finally {
+      ;(fs.promises as any).rename = originalRename
+    }
+    assert.equal(failedCleanupResponse.status, 500)
+    assert.equal(fs.existsSync(blockedCleanupTarget), true)
+    const cleanupFailure = backend.db.getReplayByLiveKey(baseDir, 'cleanup-failure')!
+    assert.equal(cleanupFailure.status, 'paused', 'failed cleanup must leave a retryable non-busy state')
+    assert.match(cleanupFailure.message, /retained for retry/i)
+    assert.equal(
+      path.resolve(baseDir, cleanupFailure.cleanup_part_path),
+      blockedCleanupTarget,
+      'failed cleanup debt must remain durable',
+    )
+
+    const cleanupRetryResponse = await fetch(`${baseURL}/api/replays/cleanup-failure/delete-file`, { method: 'POST' })
+    assert.equal(cleanupRetryResponse.status, 200)
+    assert.equal(fs.existsSync(blockedCleanupTarget), false)
+    const cleanupRetried = backend.db.getReplayByLiveKey(baseDir, 'cleanup-failure')!
+    assert.equal(cleanupRetried.status, 'deleted')
+    assert.equal(cleanupRetried.cleanup_part_path, '')
+
+    const partialDeleteFinal = path.join(backend.config.download.output_dir, 'partial-delete-final.mp4')
+    const partialDeleteCleanup = path.join(backend.config.download.output_dir, 'partial-delete-cleanup.part.mp4')
+    await writeFile(partialDeleteFinal, 'owned completed final')
+    await writeFile(partialDeleteCleanup, 'owned independent cleanup debt')
+    backend.db.insertReplay({
+      replay_id: 36,
+      live_key: 'partial-delete-failure',
+      title: 'partial delete failure',
+      status: 'completed',
+      progress: 100,
+      file_path: partialDeleteFinal,
+      output_identity: tryReadFileIdentity(partialDeleteFinal),
+      cleanup_part_path: partialDeleteCleanup,
+      cleanup_part_identity: tryReadFileIdentity(partialDeleteCleanup),
+    })
+    ;(fs.promises as any).rename = async (source: string, destination: string) => {
+      if (path.resolve(String(source)) === path.resolve(partialDeleteCleanup)) {
+        throw Object.assign(new Error('simulated second-candidate cleanup failure'), { code: 'EIO' })
+      }
+      return originalRename(source, destination)
+    }
+    let partialDeleteResponse: Response
+    try {
+      partialDeleteResponse = await fetch(`${baseURL}/api/replays/partial-delete-failure/delete-file`, { method: 'POST' })
+    } finally {
+      ;(fs.promises as any).rename = originalRename
+    }
+    assert.equal(partialDeleteResponse.status, 500)
+    assert.equal(fs.existsSync(partialDeleteFinal), false)
+    assert.equal(fs.existsSync(partialDeleteCleanup), true)
+    const partialDeleteFailed = backend.db.getReplayByLiveKey(baseDir, 'partial-delete-failure')!
+    assert.equal(partialDeleteFailed.status, 'paused')
+    assert.notEqual(partialDeleteFailed.output_state, 'available')
+    assert.equal(partialDeleteFailed.file_path, '')
+    assert.equal(path.resolve(baseDir, partialDeleteFailed.cleanup_part_path), partialDeleteCleanup)
+    const partialDeleteRetry = await fetch(`${baseURL}/api/replays/partial-delete-failure/delete-file`, { method: 'POST' })
+    assert.equal(partialDeleteRetry.status, 200)
+    assert.equal(fs.existsSync(partialDeleteCleanup), false)
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'partial-delete-failure')?.status, 'deleted')
+
+    const tombstoneDeleteFinal = path.join(backend.config.download.output_dir, 'tombstone-delete-final.mp4')
+    await writeFile(tombstoneDeleteFinal, 'owned completed output moved into a tombstone')
+    const tombstoneDeleteIdentity = tryReadFileIdentity(tombstoneDeleteFinal)
+    backend.db.insertReplay({
+      replay_id: 37,
+      live_key: 'tombstone-delete-failure',
+      title: 'tombstone delete failure',
+      status: 'completed',
+      progress: 100,
+      file_path: tombstoneDeleteFinal,
+      output_identity: tombstoneDeleteIdentity,
+      file_size: fs.statSync(tombstoneDeleteFinal).size,
+    })
+    const originalDeleteRm = fs.promises.rm.bind(fs.promises)
+    const originalDeleteLink = fs.promises.link.bind(fs.promises)
+    let tombstoneRmAttempts = 0
+    let blockedRestoreAttempts = 0
+    ;(fs.promises as any).rm = async (...args: Parameters<typeof fs.promises.rm>) => {
+      const candidate = path.resolve(String(args[0]))
+      if (candidate.includes('.tombstone-delete-final.mp4.arc-delete-')) {
+        tombstoneRmAttempts += 1
+        throw Object.assign(
+          new Error(tombstoneRmAttempts === 1 ? 'simulated tombstone EBUSY' : 'stop retries after exercising EBUSY'),
+          { code: tombstoneRmAttempts === 1 ? 'EBUSY' : 'EIO' },
+        )
+      }
+      return originalDeleteRm(...args)
+    }
+    ;(fs.promises as any).link = async (source: string, destination: string) => {
+      if (
+        path.resolve(String(destination)) === path.resolve(tombstoneDeleteFinal)
+        && String(source).includes('.tombstone-delete-final.mp4.arc-delete-')
+      ) {
+        blockedRestoreAttempts += 1
+        throw Object.assign(new Error('simulated hard-link restore EBUSY'), { code: 'EBUSY' })
+      }
+      return originalDeleteLink(source, destination)
+    }
+    let tombstoneDeleteResponse: Response
+    try {
+      tombstoneDeleteResponse = await fetch(`${baseURL}/api/replays/tombstone-delete-failure/delete-file`, { method: 'POST' })
+    } finally {
+      ;(fs.promises as any).rm = originalDeleteRm
+      ;(fs.promises as any).link = originalDeleteLink
+    }
+    assert.equal(tombstoneDeleteResponse.status, 500)
+    assert.equal(tombstoneRmAttempts >= 2, true)
+    assert.equal(blockedRestoreAttempts, 1)
+    assert.equal(fs.existsSync(tombstoneDeleteFinal), false, 'the original name must remain absent when restoration is locked')
+    const tombstoneDeleteFailed = backend.db.getReplayByLiveKey(baseDir, 'tombstone-delete-failure')!
+    assert.equal(tombstoneDeleteFailed.status, 'paused', 'a tombstoned final cannot remain completed')
+    assert.notEqual(tombstoneDeleteFailed.output_state, 'available')
+    assert.equal(tombstoneDeleteFailed.file_path, tombstoneDeleteFinal, 'the durable name must be retained for tombstone discovery')
+    assert.equal(tombstoneDeleteFailed.output_identity, tombstoneDeleteIdentity)
+    assert.equal(
+      fs.readdirSync(path.dirname(tombstoneDeleteFinal)).some(name => name.includes('.tombstone-delete-final.mp4.arc-delete-')),
+      true,
+      'the identity-bound tombstone must remain discoverable',
+    )
+    const tombstoneDeleteRetry = await fetch(`${baseURL}/api/replays/tombstone-delete-failure/delete-file`, { method: 'POST' })
+    assert.equal(tombstoneDeleteRetry.status, 200)
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'tombstone-delete-failure')?.status, 'deleted')
+    assert.equal(
+      fs.readdirSync(path.dirname(tombstoneDeleteFinal)).some(name => name.includes('.tombstone-delete-final.mp4.arc-delete-')),
+      false,
+    )
+
+    const legacyUnverifiedPath = path.join(backend.config.download.output_dir, 'legacy-unverified.mp4')
+    await writeFile(legacyUnverifiedPath, 'legacy file without a durable identity')
+    backend.db.insertReplay({
+      replay_id: 35,
+      live_key: 'legacy-unverified',
+      title: 'legacy unverified',
+      status: 'completed',
+      file_path: legacyUnverifiedPath,
+      file_size: fs.statSync(legacyUnverifiedPath).size,
+    })
+    const legacyDeleteResponse = await fetch(`${baseURL}/api/replays/legacy-unverified/delete-file`, { method: 'POST' })
+    assert.equal(legacyDeleteResponse.status, 409, 'an existing path without durable identity must not be deleted')
+    assert.equal(fs.readFileSync(legacyUnverifiedPath, 'utf8'), 'legacy file without a durable identity')
+    const legacyAfterBlockedDelete = backend.db.getReplayByLiveKey(baseDir, 'legacy-unverified')!
+    assert.equal(legacyAfterBlockedDelete.status, 'completed')
+    assert.equal(legacyAfterBlockedDelete.file_path, legacyUnverifiedPath)
+    assert.equal(legacyAfterBlockedDelete.output_state, 'unavailable')
+    const legacyDownloadResponse = await fetch(`${baseURL}/api/replays/legacy-unverified/download`, { method: 'POST' })
+    assert.equal(legacyDownloadResponse.status, 409, 'a blocked completed delete must not become queueable')
+    assert.equal(backend.db.getReplayByLiveKey(baseDir, 'legacy-unverified')?.file_path, legacyUnverifiedPath)
 
     const completedPath = path.join(backend.config.download.output_dir, 'completed.mp4')
     await writeFile(completedPath, 'done')
@@ -317,15 +683,15 @@ async function main() {
 
     backend.diskStatsCache = null
     backend.diskStatsPromise = null
-    const originalGetDirSize = backend.getDirSize.bind(backend)
+    const originalGetKnownServiceStorageBytes = backend.getKnownServiceStorageBytes.bind(backend)
     let markOldStatsStarted: (() => void) | undefined
     let releaseOldStats: (() => void) | undefined
     const oldStatsStarted = new Promise<void>(resolve => { markOldStatsStarted = resolve })
     const oldStatsGate = new Promise<void>(resolve => { releaseOldStats = resolve })
-    let firstDirSize = true
-    ;(backend as any).getDirSize = async () => {
-      if (firstDirSize) {
-        firstDirSize = false
+    let firstKnownStorageRead = true
+    ;(backend as any).getKnownServiceStorageBytes = async () => {
+      if (firstKnownStorageRead) {
+        firstKnownStorageRead = false
         markOldStatsStarted?.()
         await oldStatsGate
       }
@@ -350,13 +716,13 @@ async function main() {
 
     backend.diskStatsCache = null
     backend.diskStatsPromise = null
-    let failDirSize = true
-    ;(backend as any).getDirSize = async (target: string) => {
-      if (failDirSize) {
-        failDirSize = false
+    let failKnownStorage = true
+    ;(backend as any).getKnownServiceStorageBytes = async () => {
+      if (failKnownStorage) {
+        failKnownStorage = false
         throw new Error('fixture disk failure')
       }
-      return originalGetDirSize(target)
+      return originalGetKnownServiceStorageBytes()
     }
     await assert.rejects(backend.getDiskStats(), /fixture disk failure/)
     assert.equal(backend.diskStatsPromise, null)
@@ -364,10 +730,14 @@ async function main() {
 
     occupiedBackend = await DesktopBackend.create(occupiedBaseDir)
     occupiedBackend.config.server.port = (backend.server.address() as AddressInfo).port
-    await assert.rejects(
-      occupiedBackend.listen(),
-      (error: unknown) => (error as NodeJS.ErrnoException).code === 'EADDRINUSE',
+    const occupiedFallbackURL = await occupiedBackend.listen()
+    await occupiedBackend.waitForStartupReconciliation()
+    assert.notEqual(
+      (occupiedBackend.server.address() as AddressInfo).port,
+      (backend.server.address() as AddressInfo).port,
+      'a packaged instance must fall back to a free loopback port when the configured port is occupied',
     )
+    assert.deepEqual(await (await fetch(`${occupiedFallbackURL}/api/health`)).json(), { ok: true })
     await occupiedBackend.stop()
     occupiedBackend = undefined
 

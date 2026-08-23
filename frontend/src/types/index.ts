@@ -11,6 +11,8 @@ export interface Replay {
   duration: number
   status: string
   message: string
+  output_state?: 'available' | 'unavailable' | 'ownership_changed' | 'unknown' | 'not_applicable'
+  portable_relocation_pending?: boolean
   file_path: string
   cover_url: string
   local_cover: string
@@ -99,6 +101,7 @@ export interface ScanSummary {
   updated_records: number
   covers_updated: number
   marked_deleted: number
+  unavailable_outputs: number
   already_up_to_date: number
 }
 
@@ -134,8 +137,14 @@ export type ClipTaskRecord = {
   start_time: number
   end_time: number
   file_path: string
+  part_path: string
+  artifact_state: '' | 'building' | 'built' | 'verified' | 'published_cleanup' | 'cleanup_pending'
+  artifact_identity: string
+  part_identity?: string
+  portable_relocation_pending?: boolean
+  output_state?: 'available' | 'unavailable' | 'ownership_changed' | 'unknown' | 'not_applicable'
   progress: number
-  status: 'pending' | 'processing' | 'done' | 'error'
+  status: 'pending' | 'processing' | 'cancelling' | 'done' | 'error'
   message: string
 }
 

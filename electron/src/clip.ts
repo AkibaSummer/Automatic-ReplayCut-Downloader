@@ -4,10 +4,24 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { AppConfig } from './types'
 import { BilibiliClient, USER_AGENT } from './bilibili'
-import { formatSeconds, sanitizeFilename, uniquePath, ensureDir } from './utils'
+import {
+  CLIP_TEMP_SENTINEL,
+  CLIP_TEMP_SENTINEL_CONTENT,
+  ensureDir,
+  fileMatchesIdentity,
+  formatSeconds,
+  publishFileWithRetry,
+  removeFileWithRetry,
+  removePathWithRetry,
+  sanitizeFilename,
+  tryReadDirectoryIdentity,
+  tryReadFileIdentity,
+  uniquePath,
+} from './utils'
 import { resolveAppPathWithBase } from './config'
 import _ffmpegPath from 'ffmpeg-static'
 import ffmpeg from 'fluent-ffmpeg'
+import { parseFile } from 'music-metadata'
 
 function resolveFFmpegPath(): string | null {
   if (!_ffmpegPath) return null
@@ -26,6 +40,13 @@ export type ClipQualitySelection = {
   audioCodec?: string
   videoId?: number
   videoCodec?: string
+}
+
+export type ClipOutputLifecycle = {
+  onReserved?: (paths: { outPath: string; partPath: string; identity?: string }) => void | Promise<void>
+  onBuilt?: (paths: { outPath: string; partPath: string; identity?: string }) => void | Promise<void>
+  onVerified?: (paths: { outPath: string; partPath: string; identity?: string }) => void | Promise<void>
+  onPublished?: (paths: { outPath: string; partPath: string; sourceRemoved: boolean; identity?: string }) => void | Promise<void>
 }
 
 function abortError() {
@@ -52,6 +73,7 @@ export class ClipService {
     prefixCut: boolean = true, suffixTime: boolean = true,
     clipMode: ClipMode = 'copy', signal?: AbortSignal,
     qualitySelection?: ClipQualitySelection,
+    outputLifecycle?: ClipOutputLifecycle,
   ) {
     throwIfAborted(signal)
     if (startTime < 0) startTime = 0
@@ -112,10 +134,24 @@ export class ClipService {
     const tempRoot = resolveAppPathWithBase(this.baseDir, this.config.download.temp_dir)
     ensureDir(tempRoot)
     const tempDir = fs.mkdtempSync(path.join(tempRoot, 'clip-'))
+    fs.writeFileSync(
+      path.join(tempDir, CLIP_TEMP_SENTINEL),
+      CLIP_TEMP_SENTINEL_CONTENT,
+      { flag: 'wx' },
+    )
+    const tempDirIdentity = tryReadDirectoryIdentity(tempDir)
     let outPath = ''
     let partPath = ''
+    let partIdentity = ''
+    let outputBuilt = false
+    let outputVerified = false
+    let outputPublished = false
+    let retainedPartPath = ''
     try {
       ;({ outPath, partPath } = this.reserveOutputPath(desiredPath))
+      partIdentity = tryReadFileIdentity(partPath)
+      if (!partIdentity) throw new Error(`Cannot verify reserved clip output ownership: ${partPath}`)
+      await outputLifecycle?.onReserved?.({ outPath, partPath, identity: partIdentity })
       if (effectiveMode === 'smart') {
         result = await this.localSmartCut(videoUrl, audioUrl, headers, startTime, endTime, partPath, tempDir, onProgress, signal)
       } else if (effectiveMode === 'copy') {
@@ -130,17 +166,84 @@ export class ClipService {
       if (!fs.existsSync(partPath) || fs.statSync(partPath).size === 0) {
         throw new Error('Clip failed: output file is empty')
       }
-      fs.renameSync(partPath, outPath)
-      result.size = fs.statSync(outPath).size
+      if (!fileMatchesIdentity(partPath, partIdentity)) {
+        throw Object.assign(
+          new Error(`Reserved clip output path was replaced; the foreign file was preserved: ${partPath}`),
+          { code: 'EOWNERSHIP' },
+        )
+      }
+      outputBuilt = true
+      await outputLifecycle?.onBuilt?.({ outPath, partPath, identity: partIdentity })
+      onProgress?.(99, '校验切片输出...')
+      await this.verifyClipOutput(partPath, totalDuration, effectiveMode, signal)
+      throwIfAborted(signal)
+      outputVerified = true
+      await outputLifecycle?.onVerified?.({ outPath, partPath, identity: partIdentity })
+      const outputSize = fs.statSync(partPath).size
+      const publishResult = await publishFileWithRetry(partPath, outPath, {
+        signal,
+        requireAtomicNoClobber: true,
+        deferSourceCleanup: true,
+        expectedSourceIdentity: partIdentity,
+        onRetry: ({ retry, maxRetries }) => {
+          if (retry === 1 || retry === maxRetries || retry % 3 === 0) {
+            onProgress?.(99, `输出文件暂时被占用，正在重试保存（${retry}/${maxRetries}）...`)
+          }
+        },
+      })
+      outputPublished = true
+      await outputLifecycle?.onPublished?.({
+        outPath,
+        partPath,
+        sourceRemoved: false,
+        identity: partIdentity,
+      })
+      let sourceRemoved = publishResult.sourceRemoved
+      if (publishResult.cleanupDeferred) {
+        try {
+          await removeFileWithRetry(partPath, { expectedIdentity: partIdentity })
+          sourceRemoved = true
+        } catch (cleanupError) {
+          console.error(`[clip] Published output retained a locked working link ${partPath}:`, cleanupError)
+        }
+      }
+      retainedPartPath = sourceRemoved ? '' : partPath
+      partPath = ''
+      result.size = outputSize
     } catch (err) {
-      if (partPath) await fs.promises.rm(partPath, { force: true }).catch(() => {})
+      if (partPath) {
+        if (outputVerified || outputBuilt) {
+          const error = err instanceof Error ? err : new Error(String(err))
+          throw Object.assign(error, {
+            recoverablePath: fs.existsSync(partPath) ? partPath : '',
+            publishedPath: outputPublished && outPath && fs.existsSync(outPath) ? outPath : '',
+          })
+        } else {
+          try {
+            await removeFileWithRetry(partPath, { expectedIdentity: partIdentity })
+          } catch (cleanupError) {
+            console.error(`[clip] Failed to remove working file ${partPath}:`, cleanupError)
+            const error = err instanceof Error ? err : new Error(String(err))
+            throw Object.assign(error, { cleanupPath: partPath })
+          }
+        }
+      }
       throw err
     } finally {
-      await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+      try {
+        await removePathWithRetry(tempDir, {
+          recursive: true,
+          expectedDirectoryIdentity: tempDirIdentity,
+        })
+      } catch (cleanupError) {
+        console.error(`[clip] Failed to remove temporary working directory ${tempDir}:`, cleanupError)
+      }
     }
 
     return {
       path: outPath, fileName: path.basename(outPath), size: result.size,
+      workingPath: retainedPartPath,
+      identity: partIdentity,
       title: info.title, duration: info.duration, startTime, endTime,
       message: result.message,
     }
@@ -178,6 +281,51 @@ export class ClipService {
         const stem = desiredPath.slice(0, -ext.length)
         outPath = `${stem} (${suffix})${ext}`
       }
+    }
+  }
+
+  private async verifyClipOutput(
+    filePath: string,
+    expectedDuration: number,
+    mode: ClipMode,
+    signal?: AbortSignal,
+  ) {
+    throwIfAborted(signal)
+    const stat = await fs.promises.stat(filePath)
+    if (!stat.isFile() || stat.size === 0) {
+      throw new Error('Clip output verification failed: output is not a non-empty file')
+    }
+
+    let metadata: Awaited<ReturnType<typeof parseFile>>
+    try {
+      metadata = await parseFile(filePath)
+    } catch (error) {
+      throw new Error(
+        `Clip output verification failed: ${error instanceof Error ? error.message : String(error)}`,
+      )
+    }
+    throwIfAborted(signal)
+
+    const tracks = metadata.format.trackInfo || []
+    const hasVideo = metadata.format.hasVideo === true || tracks.some(track => Boolean(track.video))
+    const hasAudio = metadata.format.hasAudio === true || tracks.some(track => Boolean(track.audio))
+    if (!hasVideo || !hasAudio) {
+      throw new Error(
+        `Clip output verification failed: missing ${!hasVideo && !hasAudio ? 'video and audio' : !hasVideo ? 'video' : 'audio'} stream`,
+      )
+    }
+
+    const actualDuration = Number(metadata.format.duration || 0)
+    if (!Number.isFinite(actualDuration) || actualDuration <= 0) {
+      throw new Error('Clip output verification failed: duration is unavailable')
+    }
+    const durationMargin = mode === 'copy'
+      ? Math.max(5, Math.min(15, expectedDuration * 0.02))
+      : Math.max(1, Math.min(5, expectedDuration * 0.02))
+    if (Math.abs(actualDuration - expectedDuration) > durationMargin) {
+      throw new Error(
+        `Clip output verification failed: expected ${expectedDuration.toFixed(1)}s, got ${actualDuration.toFixed(1)}s`,
+      )
     }
   }
 
@@ -472,9 +620,10 @@ export class ClipService {
           signal
         )
         // Rename the first segment to bodyTs
-        await fs.promises.rename(
+        await publishFileWithRetry(
           path.join(tempDir, 'seg_body_000.ts'),
-          bodyTs
+          bodyTs,
+          { signal, useHardLink: false },
         )
         tsFiles.push(bodyTs)
       }

@@ -66,9 +66,38 @@ export function registerSystemRoutes(backend: DesktopBackend) {
     }
   })
 
-  backend.app.post('/api/cleanup-streams', (_req: Request, res: Response) => {
-    const result = backend.db.prepare('DELETE FROM stream_slices WHERE replay_id NOT IN (SELECT replay_id FROM bilibili_replays)').run()
-    res.json({ count: result.changes })
+  backend.app.post('/api/cleanup-streams', async (_req: Request, res: Response) => {
+    if (backend.databaseMaintenance) {
+      res.status(409).json({ error: 'Database maintenance is already in progress' })
+      return
+    }
+
+    const runtime = backend.getRuntime()
+    const hasActiveWork = backend.hasInFlightMutations()
+      || backend.activeTasks.size > 0
+      || backend.queue.length > 0
+      || backend.clipTaskPromises.size > 0
+      || backend.clipTaskQueue.length > 0
+      || backend.deletingReplays.size > 0
+      || backend.cachingReplays.size > 0
+      || runtime.downloading_tasks > 0
+      || runtime.queued_tasks > 0
+    if (hasActiveWork) {
+      res.status(409).json({ error: 'Please pause or wait for all replay and clip tasks before compacting the database' })
+      return
+    }
+
+    let mutation: ReturnType<DesktopBackend['beginMutation']> | undefined
+    try {
+      mutation = backend.beginMutation()
+      backend.databaseMaintenance = true
+      res.json(await backend.db.cleanupStreamCacheAndCompact())
+    } catch (error) {
+      backend.sendError(res, error)
+    } finally {
+      backend.databaseMaintenance = false
+      mutation?.finish()
+    }
   })
 
   backend.app.get('/api/stats/disk', async (_req: Request, res: Response) => {
