@@ -41,7 +41,7 @@ async function holdExclusiveWindowsLock(filePath: string, durationMs: number): P
     '$stream.Dispose()',
   ].join('\n')
   const child = spawn(
-    'powershell.exe',
+    path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
     {
       env: {
@@ -65,9 +65,11 @@ async function holdExclusiveWindowsLock(filePath: string, durationMs: number): P
     })
   })
 
-  await new Promise<void>((resolve, reject) => {
+  // A cold SYSTEM PowerShell startup can exceed five seconds on small hosts.
+  // Keep readiness bounded without weakening the actual file-lock assertions.
+  const readiness = new Promise<void>((resolve, reject) => {
     let stdout = ''
-    const timer = setTimeout(() => reject(new Error('exclusive-lock helper did not become ready')), 5_000)
+    const timer = setTimeout(() => reject(new Error('exclusive-lock helper did not become ready')), 30_000)
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', chunk => {
       stdout += chunk
@@ -85,6 +87,17 @@ async function holdExclusiveWindowsLock(filePath: string, durationMs: number): P
       reject(new Error(`exclusive-lock helper closed before ready (${code}): ${stderr}`))
     })
   })
+
+  // Observe an early child failure before readiness settles, and always reclaim
+  // our own helper if readiness fails so it cannot hold a synthetic file open.
+  void closed.catch(() => undefined)
+  try {
+    await readiness
+  } catch (error) {
+    child.kill()
+    await closed.catch(() => undefined)
+    throw error
+  }
 
   return { closed }
 }
