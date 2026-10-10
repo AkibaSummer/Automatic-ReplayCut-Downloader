@@ -20,24 +20,46 @@ export class BilibiliClient {
 
   public async loadCookies(signal?: AbortSignal) {
     const fromConfig = this.config.bilibili.cookies || {}
-    for (const [key, value] of Object.entries(fromConfig)) {
-      this.cookies.set(key, value)
-    }
+    const nextCookies = new Map(this.config.bilibili.cookie_file_readonly ? [] : Object.entries(fromConfig))
     const cookieFile = this.config.bilibili.cookie_file
-    if (!cookieFile) return
-    try {
-      const parsed = JSON.parse(await fsp.readFile(cookieFile, { encoding: 'utf8', signal })) as Record<string, string>
-      signal?.throwIfAborted()
-      for (const [key, value] of Object.entries(parsed)) {
-        this.cookies.set(key, value)
+    if (cookieFile) {
+      try {
+        const text = (await fsp.readFile(cookieFile, { encoding: 'utf8', signal })).replace(/^\uFEFF/, '').trim()
+        signal?.throwIfAborted()
+        if (this.config.bilibili.cookie_file_readonly && !text) throw new Error('Invalid cookie file')
+        if (this.config.bilibili.cookie_file_readonly && !text.startsWith('{')) {
+          for (const pair of text.replace(/^Cookie:\s*/i, '').split(';')) {
+            if (!pair.trim()) continue
+            const index = pair.indexOf('=')
+            if (index < 1) throw new Error('Invalid cookie file')
+            const name = pair.slice(0, index).trim()
+            const value = pair.slice(index + 1).trim()
+            if (!/^[A-Za-z0-9_-]+$/.test(name) || /[\r\n\x00]/.test(value)) throw new Error('Invalid cookie file')
+            nextCookies.set(name, value)
+          }
+        } else {
+          const parsed: unknown = JSON.parse(text)
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid cookie file')
+          for (const [name, value] of Object.entries(parsed)) {
+            if (!/^[A-Za-z0-9_-]+$/.test(name) || typeof value !== 'string' || /[\r\n\x00;]/.test(value)) {
+              throw new Error('Invalid cookie file')
+            }
+            nextCookies.set(name, value)
+          }
+        }
+      } catch (error) {
+        if ((error as Error).name === 'AbortError' || signal?.aborted) throw error
+        if (this.config.bilibili.cookie_file_readonly) throw new Error('Cannot load read-only Bilibili credentials')
+        nextCookies.clear()
+        for (const [name, value] of Object.entries(fromConfig)) nextCookies.set(name, value)
       }
-    } catch (error) {
-      if ((error as Error).name === 'AbortError') throw error
-      // Ignore
     }
+    signal?.throwIfAborted()
+    this.cookies = nextCookies
   }
 
   public async saveCookies() {
+    if (this.config.bilibili.cookie_file_readonly) throw new Error('Bilibili credentials are read-only; use the account owner to renew login')
     const cookieFile = this.config.bilibili.cookie_file
     if (!cookieFile) return
     const payload = Object.fromEntries(this.cookies.entries())

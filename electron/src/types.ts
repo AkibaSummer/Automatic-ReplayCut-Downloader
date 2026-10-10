@@ -3,6 +3,7 @@ export type AppConfig = {
     anchor_id: number
     cookies: Record<string, string>
     cookie_file: string
+    cookie_file_readonly?: boolean
   }
   download: {
     output_dir: string

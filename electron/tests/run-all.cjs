@@ -14,6 +14,7 @@ const tests = [
   'electron/tests/local-origin-policy.ts',
   'electron/tests/avatar-proxy.ts',
   'electron/tests/bilibili-network.ts',
+  'electron/tests/bilibili-cookies.ts',
   'electron/tests/stream-cache-compaction.ts',
   'electron/tests/disk-stats-performance.ts',
   'electron/tests/audio-proxy-integration.ts',

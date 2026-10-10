@@ -30,6 +30,10 @@ Do not start the normal application against production data merely to run tests.
   not source files. Keep them outside a coding workspace on a shared bot host.
 - Feishu application credentials for the replay table are distinct from the
   coding-chat bot and from personal Feishu OAuth. Do not replace one with another.
+- A shared Bilibili Cookie header file may be referenced with
+  `bilibili.cookie_file_readonly: true`. It is loaded into memory only; saving
+  credentials fails explicitly. Renew that login through its original account
+  owner, not through this application's QR login or an exported cookie copy.
 - Do not restart services, install shared runtime upgrades or reload an active
   coding bridge while any task is running or queued. Isolated project tests may run.
 - Commit/push/publish only when the current user request authorizes it. Do not
