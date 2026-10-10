@@ -6,6 +6,7 @@ import type { Request, Response } from 'express'
 import { REPLAY_OUTPUT_UNAVAILABLE_PREFIX } from '../db'
 import {
   fileMatchesIdentity,
+  finalPathFromMediaWorkingPath,
   parseDeleteEntryName,
   parseOwnedDeleteEntryName,
   parseReplayTempSentinel,
@@ -17,10 +18,7 @@ import {
 } from '../utils'
 
 function finalPathFromRecoverablePart(partPath: string) {
-  const extension = path.extname(partPath)
-  const stem = path.basename(partPath, extension)
-  if (!extension || !stem.toLocaleLowerCase().endsWith('.part')) return ''
-  return path.join(path.dirname(partPath), `${stem.slice(0, -'.part'.length)}${extension}`)
+  return finalPathFromMediaWorkingPath(partPath)
 }
 
 export function registerReplayRoutes(backend: DesktopBackend) {

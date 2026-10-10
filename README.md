@@ -43,7 +43,7 @@ npm start
 .\build_release.ps1
 ```
 
-产物在 `release/ReplayManager-v0.3.14-windows-x64.zip`。
+产物在 `release/ReplayManager-v0.3.16-windows-x64.zip`。
 
 ### 用户使用
 

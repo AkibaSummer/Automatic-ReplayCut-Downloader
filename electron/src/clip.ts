@@ -10,6 +10,7 @@ import {
   ensureDir,
   fileMatchesIdentity,
   formatSeconds,
+  mediaWorkingPath,
   publishFileWithRetry,
   removeFileWithRetry,
   removePathWithRetry,
@@ -60,6 +61,8 @@ function throwIfAborted(signal?: AbortSignal) {
 }
 
 export class ClipService {
+  private readonly reservedOutputPaths = new Set<string>()
+
   constructor(
     private config: AppConfig,
     private bilibiliClient: BilibiliClient,
@@ -149,9 +152,7 @@ export class ClipService {
     let retainedPartPath = ''
     try {
       ;({ outPath, partPath } = this.reserveOutputPath(desiredPath))
-      partIdentity = tryReadFileIdentity(partPath)
-      if (!partIdentity) throw new Error(`Cannot verify reserved clip output ownership: ${partPath}`)
-      await outputLifecycle?.onReserved?.({ outPath, partPath, identity: partIdentity })
+      await outputLifecycle?.onReserved?.({ outPath, partPath })
       if (effectiveMode === 'smart') {
         result = await this.localSmartCut(videoUrl, audioUrl, headers, startTime, endTime, partPath, tempDir, onProgress, signal)
       } else if (effectiveMode === 'copy') {
@@ -166,6 +167,8 @@ export class ClipService {
       if (!fs.existsSync(partPath) || fs.statSync(partPath).size === 0) {
         throw new Error('Clip failed: output file is empty')
       }
+      partIdentity = tryReadFileIdentity(partPath)
+      if (!partIdentity) throw new Error(`Cannot verify generated clip output ownership: ${partPath}`)
       if (!fileMatchesIdentity(partPath, partIdentity)) {
         throw Object.assign(
           new Error(`Reserved clip output path was replaced; the foreign file was preserved: ${partPath}`),
@@ -211,7 +214,11 @@ export class ClipService {
       partPath = ''
       result.size = outputSize
     } catch (err) {
+      if (!outputBuilt && ['EEXIST', 'EOWNERSHIP'].includes((err as NodeJS.ErrnoException).code || '')) {
+        throw err
+      }
       if (partPath) {
+        partIdentity ||= tryReadFileIdentity(partPath)
         if (outputVerified || outputBuilt) {
           const error = err instanceof Error ? err : new Error(String(err))
           throw Object.assign(error, {
@@ -230,6 +237,7 @@ export class ClipService {
       }
       throw err
     } finally {
+      this.releaseOutputReservation(outPath, partPath)
       try {
         await removePathWithRetry(tempDir, {
           recursive: true,
@@ -270,18 +278,37 @@ export class ClipService {
         continue
       }
       const outputExt = path.extname(outPath)
-      const partPath = `${outPath.slice(0, -outputExt.length)}.part${outputExt}`
-      try {
-        const fd = fs.openSync(partPath, 'wx')
-        fs.closeSync(fd)
-        return { outPath, partPath }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      const legacyPartPath = `${outPath.slice(0, -outputExt.length)}.part${outputExt}`
+      const partPath = mediaWorkingPath(outPath)
+      const finalKey = this.outputReservationKey(outPath)
+      const partKey = this.outputReservationKey(partPath)
+      if (
+        fs.existsSync(partPath)
+        || fs.existsSync(legacyPartPath)
+        || this.reservedOutputPaths.has(finalKey)
+        || this.reservedOutputPaths.has(partKey)
+      ) {
         const ext = path.extname(desiredPath)
         const stem = desiredPath.slice(0, -ext.length)
         outPath = `${stem} (${suffix})${ext}`
+        continue
       }
+      this.reservedOutputPaths.add(finalKey)
+      this.reservedOutputPaths.add(partKey)
+      return { outPath, partPath }
     }
+  }
+
+  private outputReservationKey(filePath: string) {
+    return path.resolve(filePath).toLocaleLowerCase()
+  }
+
+  private releaseOutputReservation(outPath: string, partPath: string) {
+    if (outPath) {
+      this.reservedOutputPaths.delete(this.outputReservationKey(outPath))
+      this.reservedOutputPaths.delete(this.outputReservationKey(mediaWorkingPath(outPath)))
+    }
+    if (partPath) this.reservedOutputPaths.delete(this.outputReservationKey(partPath))
   }
 
   private async verifyClipOutput(
@@ -402,7 +429,8 @@ export class ClipService {
       '-c', 'copy',
       '-avoid_negative_ts', 'make_zero',
       '-movflags', '+faststart',
-      '-y', outPath,
+      '-f', 'mp4',
+      '-n', outPath,
     ], signal)
 
     const actualDuration = await this.probeFileDuration(outPath, signal)
@@ -482,7 +510,8 @@ export class ClipService {
         '-avoid_negative_ts', 'make_zero',
         '-movflags', '+faststart',
         '-progress', 'pipe:1',
-        '-y', outPath,
+        '-f', 'mp4',
+        '-n', outPath,
       ],
       totalDuration,
       (pct, msg) => onProgress?.(35 + pct * 63, `重编码: ${msg}`),
@@ -686,7 +715,8 @@ export class ClipService {
       '-c', 'copy',
       '-shortest',
       '-movflags', '+faststart',
-      '-y', outPath
+      '-f', 'mp4',
+      '-n', outPath
     ], signal)
 
     onProgress?.(100, '智能无损切片完成')
@@ -847,11 +877,11 @@ export class ClipService {
         let finalArgs = [...args]
         if (extraArgs.length > 0) {
           const outPath = finalArgs.pop()!
-          const dashY = finalArgs.pop()!
-          if (dashY === '-y') {
-            finalArgs = [...finalArgs, ...extraArgs, '-y', outPath]
+          const overwriteFlag = finalArgs.pop()!
+          if (overwriteFlag === '-y' || overwriteFlag === '-n') {
+            finalArgs = [...finalArgs, ...extraArgs, overwriteFlag, outPath]
           } else {
-            finalArgs = [...finalArgs, dashY, ...extraArgs, outPath]
+            finalArgs = [...finalArgs, overwriteFlag, ...extraArgs, outPath]
           }
         }
         
@@ -878,9 +908,15 @@ export class ClipService {
             finish(abortError())
             return
           }
+          if (/already exists|not overwriting/i.test(stderr)) {
+            finish(Object.assign(new Error(`FFmpeg refused occupied output: ${stderr.slice(-300)}`), { code: 'EEXIST' }))
+            return
+          }
           if (code !== 0) {
             console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-            finish(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
+            const failure = new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`)
+            if (/already exists|not overwriting/i.test(stderr)) Object.assign(failure, { code: 'EEXIST' })
+            finish(failure)
           } else finish()
         })
         proc.on('error', (e) => {
@@ -891,6 +927,13 @@ export class ClipService {
 
     return run([]).catch(err => {
       if (!signal?.aborted && err instanceof Error && err.message.includes('tag for codec hevc')) {
+        const outputPath = args.at(-1) || ''
+        if (fs.existsSync(outputPath)) {
+          throw Object.assign(
+            new Error(`HEVC retry found an occupied working path; it was preserved: ${outputPath}`),
+            { code: 'EEXIST', sourcePath: outputPath },
+          )
+        }
         return run(['-tag:v', 'hvc1'])
       }
       throw err
@@ -910,11 +953,11 @@ export class ClipService {
         let finalArgs = [...args]
         if (extraArgs.length > 0) {
           const outPath = finalArgs.pop()!
-          const dashY = finalArgs.pop()!
-          if (dashY === '-y') {
-            finalArgs = [...finalArgs, ...extraArgs, '-y', outPath]
+          const overwriteFlag = finalArgs.pop()!
+          if (overwriteFlag === '-y' || overwriteFlag === '-n') {
+            finalArgs = [...finalArgs, ...extraArgs, overwriteFlag, outPath]
           } else {
-            finalArgs = [...finalArgs, dashY, ...extraArgs, outPath]
+            finalArgs = [...finalArgs, overwriteFlag, ...extraArgs, outPath]
           }
         }
 
@@ -949,9 +992,15 @@ export class ClipService {
             finish(abortError())
             return
           }
+          if (/already exists|not overwriting/i.test(stderr)) {
+            finish(Object.assign(new Error(`FFmpeg refused occupied output: ${stderr.slice(-300)}`), { code: 'EEXIST' }))
+            return
+          }
           if (code !== 0) {
             console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-            finish(new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`))
+            const failure = new Error(`FFmpeg 失败 (code ${code}): ${stderr.slice(-300)}`)
+            if (/already exists|not overwriting/i.test(stderr)) Object.assign(failure, { code: 'EEXIST' })
+            finish(failure)
           } else finish()
         })
         proc.on('error', (e) => { 
@@ -962,6 +1011,12 @@ export class ClipService {
 
     return run([]).catch(err => {
       if (!signal?.aborted && err instanceof Error && err.message.includes('tag for codec hevc')) {
+        if (fs.existsSync(outputPath)) {
+          throw Object.assign(
+            new Error(`HEVC retry found an occupied working path; it was preserved: ${outputPath}`),
+            { code: 'EEXIST', sourcePath: outputPath },
+          )
+        }
         return run(['-tag:v', 'hvc1'])
       }
       throw err
@@ -1023,9 +1078,15 @@ export class ClipService {
           finish(abortError())
           return
         }
+        if (/already exists|not overwriting/i.test(stderr)) {
+          finish(Object.assign(new Error(`FFmpeg refused occupied output: ${stderr.slice(-300)}`), { code: 'EEXIST' }))
+          return
+        }
         if (code !== 0) {
           console.error(`[ffmpeg] Exit ${code}:\n${stderr.slice(-500)}`)
-          finish(new Error(`FFmpeg 编码失败 (code ${code}): ${stderr.slice(-300)}`))
+          const failure = new Error(`FFmpeg 编码失败 (code ${code}): ${stderr.slice(-300)}`)
+          if (/already exists|not overwriting/i.test(stderr)) Object.assign(failure, { code: 'EEXIST' })
+          finish(failure)
         } else finish()
       })
       proc.on('error', (e) => {

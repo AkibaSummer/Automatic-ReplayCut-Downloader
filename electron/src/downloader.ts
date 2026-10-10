@@ -7,7 +7,10 @@ import { SqliteStore } from './db'
 import { BilibiliClient } from './bilibili'
 import {
   fileMatchesIdentity,
+  finalPathFromMediaWorkingPath,
   formatSeconds,
+  LEGACY_ROTATED_REPLAY_OUTPUT_MESSAGE,
+  mediaWorkingPath,
   publishFileWithRetry,
   removeFileWithRetry,
   removePathWithRetry,
@@ -25,6 +28,17 @@ const PROGRESS_UPDATE_INTERVAL_MS = 250
 const RECOVERABLE_PART_MIN_AGE_MS = 30_000
 const MERGE_IN_PROGRESS_RECOVERY_MESSAGE = 'Merging all segments (recovery protected)...'
 const TRANSIENT_VALIDATION_CODES = new Set(['EBUSY', 'EACCES', 'EPERM'])
+const LEGACY_ROTATION_CLOCK_SKEW_MS = 10 * 60 * 1_000
+
+function fileIdentityBirthtimeMs(identity: string) {
+  const match = /^v1:[^:]+:[^:]+:(\d+)$/.exec(identity)
+  if (!match) return 0
+  try {
+    return Number(BigInt(match[1]) / 1_000_000n)
+  } catch {
+    return 0
+  }
+}
 
 function recoverablePartError(
   message: string,
@@ -57,6 +71,8 @@ function resolveFFmpegPath(): string | null {
 }
 
 export class DownloaderService {
+  private readonly reservedOutputPaths = new Set<string>()
+
   constructor(
     private config: AppConfig,
     private db: SqliteStore,
@@ -83,7 +99,10 @@ export class DownloaderService {
       let replay = this.db.getReplaySummaryByLiveKey(baseDir, liveKey)
       if (!replay) return
 
-      this.patchActiveReplay(liveKey, ['pending'], { status: 'pending', message: 'Checking completed working files...' }, signal, isCurrent)
+      const recoveryCheckMessage = replay.message.startsWith(LEGACY_ROTATED_REPLAY_OUTPUT_MESSAGE)
+        ? replay.message
+        : 'Checking completed working files...'
+      this.patchActiveReplay(liveKey, ['pending'], { status: 'pending', message: recoveryCheckMessage }, signal, isCurrent)
       this.emitProgress({ live_key: liveKey, status: 'pending' })
       await this.cleanupTrackedPartialReplay(replay, baseDir, signal, isCurrent)
       replay = this.db.getReplaySummaryByLiveKey(baseDir, liveKey) || replay
@@ -364,6 +383,7 @@ export class DownloaderService {
       }
       throw error
     } finally {
+      if (finalPath) this.releaseOutputReservation(finalPath, partPath)
       // Also cover failures while fetching/parsing and pause/delete aborts.
       // A later execution will refresh M3U8 before it starts downloading.
       if (freshCacheCreated) {
@@ -385,7 +405,7 @@ export class DownloaderService {
     const desiredPath = this.getDesiredOutputPath(replay)
     fs.mkdirSync(path.dirname(desiredPath), { recursive: true })
     const { finalPath, partPath } = this.reserveOutputPaths(desiredPath)
-    const partIdentity = tryReadFileIdentity(partPath)
+    let partIdentity = ''
     let outputCompleted = false
     const streamPlans: Array<{
       streamIdx: number
@@ -396,12 +416,6 @@ export class DownloaderService {
     }> = []
 
     try {
-      if (!partIdentity) throw new Error(`Cannot verify reserved replay output ownership: ${partPath}`)
-      this.patchActiveReplay(replay.live_key, ['downloading'], {
-        cleanup_part_path: partPath,
-        cleanup_part_identity: partIdentity,
-      }, signal, isCurrent)
-      await this.db.checkpoint()
       const startAt = Date.now()
       const speedHistory: number[] = []
       let lastProgressUpdateAt = 0
@@ -521,15 +535,16 @@ export class DownloaderService {
       this.patchActiveReplay(replay.live_key, ['downloading'], { status: 'merging', message: 'Merging all segments...', progress: 99 }, signal, isCurrent)
       this.emitProgress({ live_key: replay.live_key, status: 'merging', merge_progress: 0 })
 
-      // From this point FFmpeg can leave a non-empty, potentially complete MP4
-      // at any instant. Persist it as recovery-owned before starting the merge;
-      // a hard crash during the subsequent full-database checkpoint must never
-      // make startup classify a completed multi-GB output as disposable.
+      // Persist the selected working path before FFmpeg starts. Unlike older
+      // releases, the working path is not pre-created: FFmpeg creates the real
+      // media entry once, and only that generated entry becomes the durable
+      // output identity. This avoids mistaking FFmpeg's own replacement of a
+      // zero-byte placeholder for a foreign file.
       this.patchActiveReplay(replay.live_key, ['merging'], {
         recoverable_part_path: partPath,
         recoverable_state: 'merge_in_progress',
         cleanup_part_path: '',
-        output_identity: partIdentity,
+        output_identity: '',
         cleanup_part_identity: '',
         message: MERGE_IN_PROGRESS_RECOVERY_MESSAGE,
       }, signal, isCurrent)
@@ -542,14 +557,11 @@ export class DownloaderService {
         expectedDuration,
         signal,
         streamPlans[0].streamDir,
+        streamPlans.map(plan => plan.segmentFiles),
       )
+      partIdentity = tryReadFileIdentity(partPath)
+      if (!partIdentity) throw new Error(`Cannot verify generated replay output ownership: ${partPath}`)
       outputCompleted = true
-      if (!fileMatchesIdentity(partPath, partIdentity)) {
-        throw Object.assign(
-          new Error(`Reserved replay output path was replaced; the foreign file was preserved: ${partPath}`),
-          { code: 'EOWNERSHIP' },
-        )
-      }
 
       // The merge has produced the expensive, complete media artifact. Claim
       // it durably before temp cleanup, abort checks, metadata parsing, or any
@@ -600,8 +612,29 @@ export class DownloaderService {
         }
         throw err
       }
+      if (['EEXIST', 'EOWNERSHIP'].includes((err as NodeJS.ErrnoException).code || '')) {
+        if (isCurrent()) {
+          this.db.patchReplayIfStatus(replay.live_key, ['pending', 'downloading', 'merging', 'paused', 'deleting'], {
+            recoverable_part_path: '',
+            recoverable_state: '',
+            cleanup_part_path: '',
+            output_identity: '',
+            cleanup_part_identity: '',
+          })
+          await this.db.checkpoint()
+        }
+        throw err
+      }
       try {
-        await removeFileWithRetry(partPath, { expectedIdentity: partIdentity })
+        partIdentity ||= tryReadFileIdentity(partPath)
+        if (partIdentity) {
+          await removeFileWithRetry(partPath, { expectedIdentity: partIdentity })
+        } else if (fs.existsSync(partPath)) {
+          throw Object.assign(
+            new Error(`Cannot verify interrupted replay output ownership: ${partPath}`),
+            { code: 'EOWNERSHIP' },
+          )
+        }
         if (isCurrent()) {
           this.db.patchReplayIfStatus(replay.live_key, ['pending', 'downloading', 'merging', 'paused', 'deleting'], {
             recoverable_part_path: '',
@@ -628,6 +661,8 @@ export class DownloaderService {
         throw Object.assign(failure, { cleanupPath: partPath, cause: cleanupError })
       }
       throw err
+    } finally {
+      this.releaseOutputReservation(finalPath, partPath)
     }
   }
 
@@ -645,19 +680,35 @@ export class DownloaderService {
     for (let index = 0; index < 10_000; index += 1) {
       const suffix = index === 0 ? '' : ` (${index})`
       const finalPath = path.join(directory, `${base}${suffix}${extension}`)
-      const partPath = path.join(directory, `${base}${suffix}.part${extension}`)
-      if (fs.existsSync(finalPath)) continue
-      try {
-        const descriptor = fs.openSync(partPath, 'wx')
-        fs.closeSync(descriptor)
-        return { finalPath, partPath }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue
-        throw error
-      }
+      const partPath = mediaWorkingPath(finalPath)
+      const legacyPartPath = path.join(directory, `${base}${suffix}.part${extension}`)
+      const finalKey = this.outputReservationKey(finalPath)
+      const partKey = this.outputReservationKey(partPath)
+      if (
+        fs.existsSync(finalPath)
+        || fs.existsSync(partPath)
+        || fs.existsSync(legacyPartPath)
+        || this.reservedOutputPaths.has(finalKey)
+        || this.reservedOutputPaths.has(partKey)
+      ) continue
+      this.reservedOutputPaths.add(finalKey)
+      this.reservedOutputPaths.add(partKey)
+      return { finalPath, partPath }
     }
 
     throw new Error(`Unable to reserve replay output path for ${desiredPath}`)
+  }
+
+  private outputReservationKey(filePath: string) {
+    return path.resolve(filePath).toLocaleLowerCase()
+  }
+
+  private releaseOutputReservation(finalPath: string, partPath: string) {
+    if (finalPath) {
+      this.reservedOutputPaths.delete(this.outputReservationKey(finalPath))
+      this.reservedOutputPaths.delete(this.outputReservationKey(mediaWorkingPath(finalPath)))
+    }
+    if (partPath) this.reservedOutputPaths.delete(this.outputReservationKey(partPath))
   }
 
   private getDesiredOutputPath(replay: ReplayRecord) {
@@ -675,12 +726,9 @@ export class DownloaderService {
   ) {
     if (!recoverablePartPath) return null
     const partPath = path.resolve(baseDir, recoverablePartPath)
-    const directory = path.dirname(partPath)
-    const extension = path.extname(partPath)
     const fileName = path.basename(partPath)
-    const workingStem = path.basename(partPath, extension)
-    if (extension.toLocaleLowerCase() !== '.mp4' || !workingStem.toLocaleLowerCase().endsWith('.part')) return null
-    const finalPath = path.join(directory, `${workingStem.slice(0, -'.part'.length)}${extension}`)
+    const finalPath = finalPathFromMediaWorkingPath(partPath)
+    if (!finalPath || path.extname(finalPath).toLocaleLowerCase() !== '.mp4') return null
     if (!expectedIdentity) {
       throw recoverablePartError(
         '已登记的临时文件缺少可验证的所有权身份；为避免处理其他任务的文件，已停止自动恢复',
@@ -788,12 +836,81 @@ export class DownloaderService {
   } | null> {
     if (recoverablePartPath) {
       const resolvedPartPath = path.resolve(baseDir, recoverablePartPath)
-      const extension = path.extname(resolvedPartPath)
-      const stem = path.basename(resolvedPartPath, extension)
-      const possibleFinalPath = stem.toLocaleLowerCase().endsWith('.part')
-        ? path.join(path.dirname(resolvedPartPath), `${stem.slice(0, -'.part'.length)}${extension}`)
-        : ''
-      const expectedIdentity = replay.output_identity
+      const possibleFinalPath = finalPathFromMediaWorkingPath(resolvedPartPath)
+      let expectedIdentity = replay.output_identity
+
+      // New writers do not create a zero-byte media placeholder. If the app
+      // exited after FFmpeg created the tracked working path but before its
+      // identity checkpoint, claim that exact DB-reserved path now and run the
+      // normal settle + media validation flow below. An absent path means the
+      // merge never produced output and can be retried normally.
+      if (!expectedIdentity && replay.recoverable_state === 'merge_in_progress') {
+        expectedIdentity = tryReadFileIdentity(resolvedPartPath)
+        if (!expectedIdentity) {
+          this.patchActiveReplay(replay.live_key, ['pending'], {
+            recoverable_part_path: '',
+            recoverable_state: '',
+            output_identity: '',
+            message: 'Interrupted merge produced no working file; downloading again...',
+          }, signal, isCurrent)
+          await this.db.checkpoint()
+          return null
+        }
+        this.patchActiveReplay(replay.live_key, ['pending'], {
+          output_identity: expectedIdentity,
+          message: MERGE_IN_PROGRESS_RECOVERY_MESSAGE,
+        }, signal, isCurrent)
+        await this.db.checkpoint()
+        replay.output_identity = expectedIdentity
+      }
+
+      // v0.3.14 used a zero-byte `name.part.mp4` entry as both the filename
+      // reservation and durable ownership proof. FFmpeg can unlink that entry
+      // and create its real output under the same name, so the app then logged
+      // the exact legacy failure below and refused its own media. Repair only
+      // that narrowly-identifiable protocol bug: old layout, exact old error,
+      // no final output, a later replacement identity, and filesystem times no
+      // later than the DB failure checkpoint. Everything else remains foreign.
+      if (
+        expectedIdentity
+        && replay.recoverable_state === 'merge_in_progress'
+        && resolvedPartPath.toLocaleLowerCase().endsWith('.part.mp4')
+        && String(replay.message || '').startsWith(LEGACY_ROTATED_REPLAY_OUTPUT_MESSAGE)
+        && possibleFinalPath
+        && !fs.existsSync(possibleFinalPath)
+        && !fileMatchesIdentity(resolvedPartPath, expectedIdentity)
+      ) {
+        const currentIdentity = tryReadFileIdentity(resolvedPartPath)
+        const oldBirthtimeMs = fileIdentityBirthtimeMs(expectedIdentity)
+        const updatedAtMs = Date.parse(String(replay.UpdatedAt || ''))
+        let currentStat: fs.Stats | undefined
+        try {
+          currentStat = fs.statSync(resolvedPartPath)
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code
+          if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+            console.warn(`[downloader] Cannot inspect legacy rotated output ${resolvedPartPath}:`, error)
+          }
+        }
+        if (
+          currentIdentity
+          && oldBirthtimeMs > 0
+          && Number.isFinite(updatedAtMs)
+          && currentStat?.isFile()
+          && currentStat.size > 0
+          && currentStat.birthtimeMs > oldBirthtimeMs
+          && currentStat.birthtimeMs <= updatedAtMs + LEGACY_ROTATION_CLOCK_SKEW_MS
+          && currentStat.mtimeMs <= updatedAtMs + LEGACY_ROTATION_CLOCK_SKEW_MS
+        ) {
+          expectedIdentity = currentIdentity
+          this.patchActiveReplay(replay.live_key, ['pending'], {
+            output_identity: expectedIdentity,
+            message: 'Repairing legacy FFmpeg working-file identity; validating media...',
+          }, signal, isCurrent)
+          await this.db.checkpoint()
+          replay.output_identity = expectedIdentity
+        }
+      }
       const partInitiallyOwned = Boolean(expectedIdentity)
         && fileMatchesIdentity(resolvedPartPath, expectedIdentity)
       const finalInitiallyOwned = Boolean(expectedIdentity && possibleFinalPath)
@@ -857,7 +974,7 @@ export class DownloaderService {
         && settlePath === resolvedPartPath
         && settleStat.size === 0
       ) {
-        await removeFileWithRetry(resolvedPartPath, { expectedIdentity: replay.output_identity })
+        await removeFileWithRetry(resolvedPartPath, { expectedIdentity })
         this.patchActiveReplay(replay.live_key, ['pending'], {
           recoverable_part_path: '',
           recoverable_state: '',
@@ -922,6 +1039,29 @@ export class DownloaderService {
           recoverable_state: '',
           output_identity: '',
           message: 'Interrupted merge fragment removed; downloading again...',
+        }, signal, isCurrent)
+        await this.db.checkpoint()
+        return null
+      }
+      if (
+        replay.recoverable_state === 'complete_unverified'
+        && verified.reason === 'duration'
+        && verified.duration > 0
+        && candidate.sourceOwned
+        && !candidate.alreadyPublished
+      ) {
+        // A completed merge with a stable identity can still be semantically
+        // invalid. Older releases flattened independent replay slices whose
+        // MPEG-TS timestamps restarted at every slice boundary, producing an
+        // MP4 whose duration was only the longest slice. The task owns this
+        // unpublished artifact, so discard it on retry and rebuild with the
+        // slice-aware concat path instead of livelocking on the same file.
+        await removeFileWithRetry(candidate.partPath, { expectedIdentity: replay.output_identity })
+        this.patchActiveReplay(replay.live_key, ['pending'], {
+          recoverable_part_path: '',
+          recoverable_state: '',
+          output_identity: '',
+          message: 'Invalid merged timeline removed; downloading replay slices again...',
         }, signal, isCurrent)
         await this.db.checkpoint()
         return null
@@ -1300,6 +1440,7 @@ export class DownloaderService {
     expectedSeconds: number,
     signal: AbortSignal,
     workDir = path.dirname(outputPath),
+    segmentGroups: string[][] = [segmentFiles],
   ) {
     let totalBytes = 0
     for (const fullPath of segmentFiles) {
@@ -1308,8 +1449,15 @@ export class DownloaderService {
       }
     }
 
-    const tempPath = path.join(workDir, 'concat.ts.tmp')
-    let concatTempIdentity = ''
+    const groups = segmentGroups.filter(group => group.length > 0)
+    if (groups.length === 0) throw new Error('No replay segment groups were provided')
+    const tempPaths = groups.map((_group, index) => path.join(
+      workDir,
+      groups.length === 1 ? 'concat.ts.tmp' : `concat-${String(index).padStart(5, '0')}.ts.tmp`,
+    ))
+    const tempIdentities = new Map<string, string>()
+    const concatListPath = path.join(workDir, 'concat.ffconcat.tmp')
+    let concatListIdentity = ''
     let written = 0
     let lastMergeProgressEmitAt = 0
     let lastMergeProgressPercent = -1
@@ -1329,8 +1477,7 @@ export class DownloaderService {
       })
     }
 
-    try {
-      await new Promise<void>((resolve, reject) => {
+    const writeSegmentGroup = (groupFiles: string[], tempPath: string) => new Promise<void>((resolve, reject) => {
         const outStream = createWriteStream(tempPath, { flags: 'wx' })
         let currentStream: ReturnType<typeof createReadStream> | null = null
         let settled = false
@@ -1365,12 +1512,12 @@ export class DownloaderService {
             onAbort()
             return
           }
-          if (idx >= segmentFiles.length) {
+          if (idx >= groupFiles.length) {
             outStream.once('close', succeed)
             outStream.end()
             return
           }
-          const fullPath = segmentFiles[idx]
+          const fullPath = groupFiles[idx]
           if (!fs.existsSync(fullPath)) {
             fail(new Error(`Replay segment is missing: ${fullPath}`))
             return
@@ -1392,36 +1539,68 @@ export class DownloaderService {
         signal.addEventListener('abort', onAbort, { once: true })
         outStream.once('error', fail)
         outStream.once('open', () => {
-          concatTempIdentity = tryReadFileIdentity(tempPath)
-          if (!concatTempIdentity) {
+          const identity = tryReadFileIdentity(tempPath)
+          if (!identity) {
             fail(new Error(`Cannot verify concat temporary-file ownership: ${tempPath}`))
             return
           }
+          tempIdentities.set(tempPath, identity)
           appendNext(0)
         })
       })
 
+    try {
+      for (let index = 0; index < groups.length; index += 1) {
+        await writeSegmentGroup(groups[index], tempPaths[index])
+      }
+
       if (signal.aborted) throw this.abortError()
       emitMergeProgress(100, true)
+
+      let remuxInputPath = tempPaths[0]
+      let concatInput = false
+      if (tempPaths.length > 1) {
+        const concatText = [
+          'ffconcat version 1.0',
+          ...tempPaths.map(tempPath => `file '${path.basename(tempPath).replace(/'/g, "'\\''")}'`),
+          '',
+        ].join('\n')
+        await fsp.writeFile(concatListPath, concatText, { encoding: 'utf8', flag: 'wx' })
+        concatListIdentity = tryReadFileIdentity(concatListPath)
+        if (!concatListIdentity) {
+          throw new Error(`Cannot verify concat list ownership: ${concatListPath}`)
+        }
+        remuxInputPath = concatListPath
+        concatInput = true
+      }
 
       this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: 0, message: '转换MP4格式中 (0%)...' })
       let lastRemuxProgressAt = 0
       let lastRemuxProgressPercent = 0
-      await this.remuxTsToMp4(tempPath, outputPath, signal, (pct) => {
+      await this.remuxTsToMp4(remuxInputPath, outputPath, signal, (pct) => {
         if (pct === lastRemuxProgressPercent) return
         const now = Date.now()
         if (pct < 100 && now - lastRemuxProgressAt < PROGRESS_UPDATE_INTERVAL_MS) return
         lastRemuxProgressAt = now
         lastRemuxProgressPercent = pct
         this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: pct, message: `转换MP4格式中 (${pct}%)...` })
-      }, expectedSeconds)
+      }, expectedSeconds, concatInput)
       if (lastRemuxProgressPercent < 100) {
         this.emitProgress({ live_key: liveKey, status: 'merging', progress: 99, merge_progress: 100, message: '转换MP4格式中 (100%)...' })
       }
     } finally {
-      if (concatTempIdentity) {
+      if (concatListIdentity) {
         try {
-          await removeFileWithRetry(tempPath, { expectedIdentity: concatTempIdentity })
+          await removeFileWithRetry(concatListPath, { expectedIdentity: concatListIdentity })
+        } catch (cleanupError) {
+          console.error(`[downloader] Failed to remove concat list ${concatListPath}:`, cleanupError)
+        }
+      }
+      for (const tempPath of tempPaths) {
+        const identity = tempIdentities.get(tempPath)
+        if (!identity) continue
+        try {
+          await removeFileWithRetry(tempPath, { expectedIdentity: identity })
         } catch (cleanupError) {
           console.error(`[downloader] Failed to remove concat temp ${tempPath}:`, cleanupError)
         }
@@ -1429,7 +1608,7 @@ export class DownloaderService {
     }
   }
 
-  private async remuxTsToMp4(tsPath: string, mp4Path: string, signal: AbortSignal, onProgress?: (pct: number) => void, expectedSeconds?: number) {
+  private async remuxTsToMp4(tsPath: string, mp4Path: string, signal: AbortSignal, onProgress?: (pct: number) => void, expectedSeconds?: number, concatInput = false) {
     const ffmpegBin = resolveFFmpegPath() || 'ffmpeg'
     
     const runFfmpeg = (extraArgs: string[]) => {
@@ -1439,11 +1618,12 @@ export class DownloaderService {
           return
         }
         const proc = spawn(ffmpegBin, [
-          '-i', tsPath,
+          ...(concatInput ? ['-f', 'concat', '-safe', '0', '-i', tsPath] : ['-i', tsPath]),
           '-c', 'copy',
           '-movflags', '+faststart',
           ...extraArgs,
-          '-y', mp4Path
+          '-f', 'mp4',
+          '-n', mp4Path
         ], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
 
         let stderr = ''
@@ -1474,10 +1654,14 @@ export class DownloaderService {
           signal.removeEventListener('abort', onAbort)
           if (signal.aborted) {
             reject(this.abortError())
+          } else if (/already exists|not overwriting/i.test(stderr)) {
+            reject(Object.assign(new Error(`ffmpeg refused occupied output: ${stderr.slice(-500)}`), { code: 'EEXIST' }))
           } else if (code === 0) {
             resolve()
           } else {
-            reject(new Error(`ffmpeg remux failed: ${stderr.slice(-500)}`))
+            const failure = new Error(`ffmpeg remux failed: ${stderr.slice(-500)}`)
+            if (/already exists|not overwriting/i.test(stderr)) Object.assign(failure, { code: 'EEXIST' })
+            reject(failure)
           }
         })
         proc.on('error', (e) => {
@@ -1491,6 +1675,12 @@ export class DownloaderService {
       await runFfmpeg([])
     } catch (err) {
       if (err instanceof Error && err.message.includes('tag for codec hevc')) {
+        if (fs.existsSync(mp4Path)) {
+          throw Object.assign(
+            new Error(`HEVC remux retry found an occupied working path; it was preserved: ${mp4Path}`),
+            { code: 'EEXIST', sourcePath: mp4Path },
+          )
+        }
         await runFfmpeg(['-tag:v', 'hvc1'])
       } else {
         throw err

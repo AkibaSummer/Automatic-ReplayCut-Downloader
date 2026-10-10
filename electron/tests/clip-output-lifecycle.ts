@@ -54,6 +54,29 @@ async function main() {
       '-y', validOutput,
     ])
     await service.verifyClipOutput(validOutput, 2, 'reencode')
+
+    const partSuffixOutput = path.join(baseDir, 'real-output.mp4.part')
+    await service.runFfmpegCommand([
+      '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=30:duration=1',
+      '-f', 'lavfi', '-i', 'sine=frequency=1000:sample_rate=48000:duration=1',
+      '-map', '0:v:0', '-map', '1:a:0',
+      '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+      '-f', 'mp4', '-n', partSuffixOutput,
+    ])
+    await service.verifyClipOutput(partSuffixOutput, 1, 'reencode')
+
+    const foreignWorkingPath = path.join(baseDir, 'foreign.mp4.part')
+    fs.writeFileSync(foreignWorkingPath, 'foreign sentinel')
+    await assert.rejects(
+      service.runFfmpegCommand([
+        '-f', 'lavfi', '-i', 'color=size=16x16:duration=0.1',
+        '-f', 'mp4', '-n', foreignWorkingPath,
+      ]),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === 'EEXIST',
+      'FFmpeg must never overwrite a working path that appeared after reservation',
+    )
+    assert.equal(fs.readFileSync(foreignWorkingPath, 'utf8'), 'foreign sentinel')
+
     await assert.rejects(
       service.verifyClipOutput(validOutput, 30, 'reencode'),
       /output verification failed: expected 30\.0s/,
@@ -159,7 +182,7 @@ async function main() {
     fs.writeFileSync(occupiedSuffixFinal, 'completed')
     const occupiedReservation = service.reserveOutputPath(occupiedDesiredPath) as { outPath: string; partPath: string }
     assert.equal(occupiedReservation.outPath, path.join(configFor(baseDir).download.clip_output_dir, 'occupied (2).mp4'))
-    assert.equal(occupiedReservation.partPath, path.join(configFor(baseDir).download.clip_output_dir, 'occupied (2).part.mp4'))
+    assert.equal(occupiedReservation.partPath, path.join(configFor(baseDir).download.clip_output_dir, 'occupied (2).mp4.part'))
     assert.equal(fs.readFileSync(occupiedSuffixFinal, 'utf8'), 'completed', 'an existing suffix final must not be selected')
     fs.rmSync(occupiedBasePart, { force: true })
     fs.rmSync(occupiedSuffixFinal, { force: true })
@@ -168,7 +191,8 @@ async function main() {
     let workingPath = ''
     service.localSmartCut = async (...args: unknown[]) => {
       workingPath = String(args[5])
-      assert.match(workingPath, /\.part\.mp4$/)
+      assert.match(workingPath, /\.mp4\.part$/)
+      fs.rmSync(workingPath, { force: true })
       fs.writeFileSync(workingPath, Buffer.alloc(4096, 1))
       return { size: 4096, message: 'ok' }
     }
@@ -196,7 +220,7 @@ async function main() {
     let collisionFinal = ''
     service.localSmartCut = async (...args: unknown[]) => {
       collisionPart = String(args[5])
-      collisionFinal = collisionPart.replace(/\.part\.mp4$/i, '.mp4')
+      collisionFinal = collisionPart.replace(/\.part$/i, '')
       fs.writeFileSync(collisionPart, Buffer.alloc(3072, 8))
       fs.writeFileSync(collisionFinal, 'external sentinel')
       return { size: 3072 }

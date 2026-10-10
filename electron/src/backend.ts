@@ -37,6 +37,8 @@ import {
   REPLAY_TEMP_DIR_RE,
   REPLAY_TEMP_SENTINEL,
   fileMatchesIdentity,
+  isMediaWorkingPath,
+  LEGACY_ROTATED_REPLAY_OUTPUT_MESSAGE,
   safeNumber,
   ensureDir,
   publishFileWithRetry,
@@ -62,7 +64,7 @@ function recoverablePartPathFromFailure(value: unknown) {
   if (!value) return undefined
   if (typeof value === 'object') {
     const sourcePath = (value as { sourcePath?: unknown }).sourcePath
-    if (typeof sourcePath === 'string' && /\.part\.mp4$/i.test(sourcePath)) return sourcePath
+    if (typeof sourcePath === 'string' && isMediaWorkingPath(sourcePath)) return sourcePath
   }
   return undefined
 }
@@ -1692,9 +1694,15 @@ export class DesktopBackend {
     }
     const nextProgress = options?.resetProgress ? 0 : replay.progress
     const resetArtifact = replay.status === 'deleted' || replay.status === 'failed'
+    const preserveLegacyRotationMessage = Boolean(
+      replay.recoverable_part_path
+      && replay.recoverable_state === 'merge_in_progress'
+      && replay.output_identity
+      && replay.message.startsWith(LEGACY_ROTATED_REPLAY_OUTPUT_MESSAGE),
+    )
     const updated = this.updateReplayState(liveKey, {
       status: 'pending',
-      message: options?.message || 'Queued',
+      message: preserveLegacyRotationMessage ? replay.message : (options?.message || 'Queued'),
       progress: nextProgress,
       speed: '',
       elapsed: options?.resetProgress ? '' : replay.elapsed,

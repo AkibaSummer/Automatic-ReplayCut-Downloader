@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import ffmpegPath from 'ffmpeg-static'
 
 import { DesktopBackend } from '../src/backend'
 import { tryReadFileIdentity } from '../src/utils'
@@ -209,9 +211,9 @@ async function testReplayOutputReservationAndMissingSegments() {
     const first = service.reserveOutputPaths(desired) as { finalPath: string; partPath: string }
     const second = service.reserveOutputPaths(desired) as { finalPath: string; partPath: string }
     assert.equal(first.finalPath, desired)
-    assert.equal(first.partPath, path.join(outputDir, 'same.part.mp4'))
+    assert.equal(first.partPath, path.join(outputDir, 'same.mp4.part'))
     assert.equal(second.finalPath, path.join(outputDir, 'same (1).mp4'))
-    assert.equal(second.partPath, path.join(outputDir, 'same (1).part.mp4'))
+    assert.equal(second.partPath, path.join(outputDir, 'same (1).mp4.part'))
     fs.rmSync(first.partPath, { force: true })
     fs.rmSync(second.partPath, { force: true })
 
@@ -219,7 +221,7 @@ async function testReplayOutputReservationAndMissingSegments() {
     fs.writeFileSync(path.join(outputDir, 'same (1).mp4'), 'completed suffix')
     const third = service.reserveOutputPaths(desired) as { finalPath: string; partPath: string }
     assert.equal(third.finalPath, path.join(outputDir, 'same (2).mp4'))
-    assert.equal(third.partPath, path.join(outputDir, 'same (2).part.mp4'))
+    assert.equal(third.partPath, path.join(outputDir, 'same (2).mp4.part'))
     assert.equal(fs.readFileSync(path.join(outputDir, 'same (1).mp4'), 'utf8'), 'completed suffix')
     fs.rmSync(path.join(outputDir, 'same.part.mp4'), { force: true })
     fs.rmSync(path.join(outputDir, 'same (1).mp4'), { force: true })
@@ -233,6 +235,44 @@ async function testReplayOutputReservationAndMissingSegments() {
     )
     assert.equal(fs.existsSync(output), false)
     assert.equal(fs.existsSync(`${output}.ts.tmp`), false)
+  } finally {
+    await destroyHarness(harness)
+  }
+}
+
+async function testMultiSliceTimestampResetsProduceFullDuration() {
+  const harness = await createHarness('replay-multi-slice-timeline-')
+  try {
+    const ffmpeg = ffmpegPath?.replace('app.asar', 'app.asar.unpacked') || 'ffmpeg'
+    const slicePaths = [path.join(harness.baseDir, 'slice-1.ts'), path.join(harness.baseDir, 'slice-2.ts')]
+    for (let index = 0; index < slicePaths.length; index += 1) {
+      const generated = spawnSync(ffmpeg, [
+        '-f', 'lavfi', '-i', `testsrc2=size=160x90:rate=30:duration=1.5`,
+        '-f', 'lavfi', '-i', `sine=frequency=${440 + index * 220}:sample_rate=48000:duration=1.5`,
+        '-map', '0:v:0', '-map', '1:a:0',
+        '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest',
+        '-f', 'mpegts', '-y', slicePaths[index],
+      ], { windowsHide: true, encoding: 'utf8' })
+      assert.equal(generated.status, 0, generated.stderr.slice(-2_000))
+    }
+
+    const outputPath = path.join(harness.baseDir, 'multi-slice.mp4.part')
+    const service = harness.backend.downloaderService as any
+    await service.runFfmpegMerge(
+      'multi-slice',
+      slicePaths,
+      outputPath,
+      3,
+      new AbortController().signal,
+      harness.baseDir,
+      slicePaths.map(slicePath => [slicePath]),
+    )
+    const verified = await service.verifyDuration(outputPath, 3)
+    assert.equal(verified.ok, true, `slice-aware concat produced only ${verified.duration}s`)
+    assert.ok(verified.duration >= 2.8, `timestamp reset collapsed the output to ${verified.duration}s`)
+    assert.equal(fs.existsSync(path.join(harness.baseDir, 'concat.ffconcat.tmp')), false)
+    assert.equal(fs.existsSync(path.join(harness.baseDir, 'concat-00000.ts.tmp')), false)
+    assert.equal(fs.existsSync(path.join(harness.baseDir, 'concat-00001.ts.tmp')), false)
   } finally {
     await destroyHarness(harness)
   }
@@ -336,6 +376,7 @@ async function testMultiStreamProgressNeverRegresses() {
       return 16
     }
     service.runFfmpegMerge = async (_liveKey: string, _segments: string[], outputPath: string) => {
+      fs.rmSync(outputPath, { force: true })
       fs.writeFileSync(outputPath, Buffer.alloc(64, 2))
     }
 
@@ -404,12 +445,12 @@ async function testAtomicReplayCompletion() {
     service.getFileInfo = async () => ({ size: 1024, resolution: '1x1', bitrate: '1 Mbps' })
 
     await service.processReplayTask('atomic', new AbortController().signal, baseDir)
-    assert.match(partPath, /\.part\.mp4$/)
+    assert.match(partPath, /\.mp4\.part$/)
     assert.equal(fs.existsSync(partPath), false)
     assert.equal(fs.existsSync(finalPath), true)
     assert.equal(fs.statSync(finalPath).size, 1024)
     const completed = backend.db.getReplayByLiveKey(baseDir, 'atomic')
-    assert.equal(completed?.status, 'completed')
+    assert.equal(completed?.status, 'completed', completed?.message)
     assert.equal(completed?.file_path, finalPath)
     assert.equal(completed?.streams.length, 0, 'completed downloads must release their M3U8 cache')
   } finally {
@@ -457,6 +498,57 @@ async function testCompletedPartRecoverySkipsDownload() {
     assert.equal(completed?.recoverable_part_path, '')
     assert.equal(completed?.progress, 100)
     assert.match(completed?.message || '', /without downloading again/)
+  } finally {
+    await destroyHarness(harness)
+  }
+}
+
+async function testLegacyPlaceholderIdentityRotationIsRepaired() {
+  const harness = await createHarness('replay-legacy-identity-rotation-')
+  try {
+    const { backend, baseDir } = harness
+    backend.config.download.filename_template = '{live_key}.mp4'
+    insertReplay(backend, 'legacy-rotation', 'failed')
+    fs.mkdirSync(backend.config.download.output_dir, { recursive: true })
+    const partPath = path.join(backend.config.download.output_dir, 'legacy-rotation.part.mp4')
+    const finalPath = path.join(backend.config.download.output_dir, 'legacy-rotation.mp4')
+
+    fs.writeFileSync(partPath, Buffer.alloc(4_096, 0x5a))
+    const generatedIdentity = tryReadFileIdentity(partPath)
+    const identityParts = generatedIdentity.split(':')
+    const placeholderIdentity = `v1:${identityParts[1]}:${BigInt(identityParts[2]) + 1n}:${BigInt(identityParts[3]) - 60_000_000_000n}`
+    assert.notEqual(generatedIdentity, placeholderIdentity)
+    const staleAt = new Date(Date.now() - 60_000)
+    fs.utimesSync(partPath, staleAt, staleAt)
+
+    backend.db.patchReplay('legacy-rotation', {
+      recoverable_part_path: partPath,
+      recoverable_state: 'merge_in_progress',
+      output_identity: placeholderIdentity,
+      message: `Reserved replay output path was replaced; the foreign file was preserved: ${partPath}`,
+    })
+
+    const service = backend.downloaderService as any
+    service.verifyDuration = async () => ({ ok: true, duration: 60 })
+    service.getFileInfo = async () => ({ size: 4_096, resolution: '1x1', bitrate: '1 Mbps' })
+    service.downloadReplayWithContext = async () => {
+      throw new Error('the legacy generated output must be validated before downloading again')
+    }
+    ;(backend.bilibiliClient as any).cacheReplayM3U8 = async () => {
+      throw new Error('M3U8 must not be fetched for a repaired legacy output')
+    }
+
+    assert.equal(backend.enqueueReplay('legacy-rotation', { resetProgress: true, message: 'Retrying' }), true)
+    const execution = backend.activeTasks.get('legacy-rotation')
+    assert.ok(execution)
+    await withTimeout(execution.promise, 'legacy identity rotation recovery', 5_000)
+
+    const completed = backend.db.getReplaySummaryByLiveKey(baseDir, 'legacy-rotation')
+    assert.equal(completed?.status, 'completed', completed?.message)
+    assert.equal(completed?.file_path, finalPath)
+    assert.equal(completed?.output_identity, generatedIdentity)
+    assert.equal(fs.existsSync(partPath), false)
+    assert.equal(fs.statSync(finalPath).size, 4_096)
   } finally {
     await destroyHarness(harness)
   }
@@ -807,6 +899,46 @@ async function testDurationMismatchCannotPublishCompletedReplay() {
   }
 }
 
+async function testDurationMismatchRecoveryRedownloadsOwnedPart() {
+  const harness = await createHarness('replay-duration-mismatch-retry-')
+  try {
+    const { backend, baseDir } = harness
+    insertReplay(backend, 'duration-mismatch-retry', 'pending')
+    const partPath = path.join(backend.config.download.output_dir, 'duration-mismatch-retry.mp4.part')
+    fs.mkdirSync(path.dirname(partPath), { recursive: true })
+    fs.writeFileSync(partPath, Buffer.alloc(2_048, 0x4d))
+    const staleAt = new Date(Date.now() - 60_000)
+    fs.utimesSync(partPath, staleAt, staleAt)
+    backend.db.patchReplay('duration-mismatch-retry', {
+      recoverable_part_path: partPath,
+      recoverable_state: 'complete_unverified',
+      output_identity: tryReadFileIdentity(partPath),
+      message: 'Replay duration verification failed: expected 60s, got 30.0s',
+    })
+
+    const service = backend.downloaderService as any
+    service.verifyDuration = async () => ({ ok: false, duration: 30, reason: 'duration' })
+    let refreshCalls = 0
+    ;(backend.bilibiliClient as any).cacheReplayM3U8 = async () => {
+      refreshCalls += 1
+      throw new Error('fresh-redownload-started')
+    }
+
+    await assert.rejects(
+      service.processReplayTask('duration-mismatch-retry', new AbortController().signal, baseDir),
+      /fresh-redownload-started/,
+    )
+    assert.equal(refreshCalls, 1)
+    assert.equal(fs.existsSync(partPath), false, 'the owned invalid unpublished output must not livelock retries')
+    const retrying = backend.db.getReplaySummaryByLiveKey(baseDir, 'duration-mismatch-retry')
+    assert.equal(retrying?.recoverable_part_path, '')
+    assert.equal(retrying?.recoverable_state, '')
+    assert.equal(retrying?.output_identity, '')
+  } finally {
+    await destroyHarness(harness)
+  }
+}
+
 async function testPublicationCollisionKeepsVerifiedReplayRecovery() {
   const harness = await createHarness('replay-publication-collision-')
   try {
@@ -891,9 +1023,11 @@ async function main() {
   await testReplayAndClipShareGlobalConcurrencyLimit()
   await testCleanupStaleWaitsForRuntime()
   await testReplayOutputReservationAndMissingSegments()
+  await testMultiSliceTimestampResetsProduceFullDuration()
   await testMultiStreamProgressNeverRegresses()
   await testAtomicReplayCompletion()
   await testCompletedPartRecoverySkipsDownload()
+  await testLegacyPlaceholderIdentityRotationIsRepaired()
   await testPublishedRecoveryIgnoresForeignPartAndCleansQuarantine()
   await testRandomTombstoneOnlyRecoveryCleansDebtAndContinues()
   await testRecoverablePartPathSurvivesRestart()
@@ -901,6 +1035,7 @@ async function main() {
   await testPauseDuringPublishedLinkCleanupKeepsOwnership()
   await testPublishedCleanupBusyCompletesAndRecoversAfterRestart()
   await testDurationMismatchCannotPublishCompletedReplay()
+  await testDurationMismatchRecoveryRedownloadsOwnedPart()
   await testPublicationCollisionKeepsVerifiedReplayRecovery()
   await testFailedRefreshPreservesExistingManualCache()
   console.log('replay state-machine and output lifecycle regression tests passed')

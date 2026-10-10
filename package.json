@@ -1,7 +1,7 @@
 {
   "name": "automatic-replaycut-downloader-desktop",
   "private": true,
-  "version": "0.3.14",
+  "version": "0.3.16",
   "description": "Electron + React desktop app for Bilibili replay management",
   "main": "electron-dist/main.js",
   "type": "commonjs",

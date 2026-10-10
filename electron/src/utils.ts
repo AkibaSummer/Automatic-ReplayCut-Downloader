@@ -10,6 +10,38 @@ export const CLIP_TEMP_SENTINEL = '.replay-manager-clip-temp'
 export const CLIP_TEMP_SENTINEL_CONTENT = 'replay-manager-clip-temp:v1\n'
 export const REPLAY_TEMP_SENTINEL = '.replay-manager-replay-temp'
 export const REPLAY_TEMP_DIR_RE = /^replay-[A-Za-z0-9]{6}$/
+export const LEGACY_ROTATED_REPLAY_OUTPUT_MESSAGE = 'Reserved replay output path was replaced; the foreign file was preserved:'
+
+/**
+ * Working media is deliberately named with `.part` as the final suffix so
+ * Explorer, players, indexers and antivirus scanners do not treat an
+ * incomplete file as a playable video.  Keep accepting the legacy
+ * `name.part.mp4` layout when deriving the intended final path.
+ */
+export function mediaWorkingPath(finalPath: string) {
+  return `${finalPath}.part`
+}
+
+export function finalPathFromMediaWorkingPath(workingPath: string) {
+  if (!workingPath) return ''
+  const lower = workingPath.toLocaleLowerCase()
+  if (lower.endsWith('.part')) {
+    const candidate = workingPath.slice(0, -'.part'.length)
+    return path.extname(candidate) ? candidate : ''
+  }
+
+  const extension = path.extname(workingPath)
+  const stem = path.basename(workingPath, extension)
+  if (!extension || !stem.toLocaleLowerCase().endsWith('.part')) return ''
+  return path.join(
+    path.dirname(workingPath),
+    `${stem.slice(0, -'.part'.length)}${extension}`,
+  )
+}
+
+export function isMediaWorkingPath(workingPath: string) {
+  return Boolean(finalPathFromMediaWorkingPath(workingPath))
+}
 
 /**
  * Decode an app deletion quarantine only when its embedded ownership hash
@@ -96,9 +128,9 @@ export type FilePublishResult = {
 
 /**
  * Stable identity of an app-owned directory entry.  Size is intentionally not
- * included because FFmpeg truncates and fills the file after we reserve it;
- * the inode and birth time remain stable for that owned entry and its hard
- * link.  A missing/zero inode is treated as unverifiable so cleanup fails safe.
+ * included because a file grows while FFmpeg writes it. The inode and birth
+ * time remain stable for that generated entry and its hard link. A
+ * missing/zero inode is treated as unverifiable so cleanup fails safe.
  */
 export function readFileIdentity(filePath: string) {
   const stat = fs.statSync(filePath, { bigint: true })
